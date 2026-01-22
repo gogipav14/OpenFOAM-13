@@ -2,7 +2,7 @@
   =========                 |
   \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
    \\    /   O peration     | Website:  https://openfoam.org
-    \\  /    A nd           | Copyright (C) 2011-2021 OpenFOAM Foundation
+    \\  /    A nd           | Copyright (C) 2011-2026 OpenFOAM Foundation
      \\/     M anipulation  |
 -------------------------------------------------------------------------------
 License
@@ -24,6 +24,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "GAMGSolver.H"
+#include "diagonalSolver.H"
 #include "PCG.H"
 #include "PBiCGStab.H"
 #include "SubField.H"
@@ -665,7 +666,23 @@ void Foam::GAMGSolver::solveCoarsestLevel
         coarsestCorrField = 0;
         solverPerformance coarseSolverPerf;
 
-        if (matrixLevels_[coarsestLevel].asymmetric())
+        if (matrixLevels_[coarsestLevel].diagonal())
+        {
+            coarseSolverPerf = diagonalSolver
+            (
+                "coarsestLevelCorr",
+                matrixLevels_[coarsestLevel],
+                interfaceLevelsBouCoeffs_[coarsestLevel],
+                interfaceLevelsIntCoeffs_[coarsestLevel],
+                interfaceLevels_[coarsestLevel],
+                PBiCGStabSolverDict(tolerance_, relTol_)
+            ).solve
+            (
+                coarsestCorrField,
+                coarsestSource
+            );
+        }
+        else if (matrixLevels_[coarsestLevel].asymmetric())
         {
             coarseSolverPerf = PBiCGStab
             (
