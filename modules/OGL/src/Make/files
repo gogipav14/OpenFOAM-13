@@ -1,0 +1,20 @@
+/* OGL - OpenFOAM Ginkgo Layer */
+
+/* Executor */
+OGLExecutor/OGLExecutor.C
+
+/* Matrix conversion */
+OGLMatrix/lduToCSR.C
+
+/* Operator */
+OGLOperator/FoamGinkgoLinOp.C
+OGLOperator/HaloExchange.C
+
+/* Mixed precision */
+OGLMixedPrecision/FP32CastWrapper.C
+
+/* Solvers */
+OGLSolvers/OGLSolverBase/OGLSolverBase.C
+OGLSolvers/OGLPCGSolver/OGLPCGSolver.C
+
+LIB = $(FOAM_USER_LIBBIN)/libOGL

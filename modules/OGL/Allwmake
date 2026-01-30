@@ -1,0 +1,93 @@
+#!/bin/bash
+#------------------------------------------------------------------------------
+# =========                 |
+# \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+#  \\    /   O peration     | Website:  https://openfoam.org
+#   \\  /    A nd           | Copyright (C) 2025 OpenFOAM Foundation
+#    \\/     M anipulation  |
+#------------------------------------------------------------------------------
+# License
+#     This file is part of OpenFOAM.
+#
+#     OpenFOAM is free software: you can redistribute it and/or modify it
+#     under the terms of the GNU General Public License as published by
+#     the Free Software Foundation, either version 3 of the License, or
+#     (at your option) any later version.
+#
+#     OpenFOAM is distributed in the hope that it will be useful, but WITHOUT
+#     ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+#     FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+#     for more details.
+#
+#     You should have received a copy of the GNU General Public License
+#     along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Script
+#     Allwmake
+#
+# Description
+#     Build script for OGL (OpenFOAM Ginkgo Layer) module
+#
+#------------------------------------------------------------------------------
+cd "${0%/*}" || exit 1
+
+# Check for Ginkgo installation
+if [ -z "$GINKGO_ROOT" ]; then
+    echo "Error: GINKGO_ROOT environment variable not set"
+    echo ""
+    echo "Please set GINKGO_ROOT to your Ginkgo installation directory:"
+    echo "  export GINKGO_ROOT=/path/to/ginkgo/install"
+    echo ""
+    echo "To build Ginkgo with CUDA support:"
+    echo "  git clone https://github.com/ginkgo-project/ginkgo.git"
+    echo "  cd ginkgo && mkdir build && cd build"
+    echo "  cmake .. -DGINKGO_BUILD_CUDA=ON -DCMAKE_INSTALL_PREFIX=\$HOME/ginkgo"
+    echo "  make -j && make install"
+    echo "  export GINKGO_ROOT=\$HOME/ginkgo"
+    exit 1
+fi
+
+# Check Ginkgo library exists
+if [ ! -f "$GINKGO_ROOT/lib/libginkgo.so" ] && [ ! -f "$GINKGO_ROOT/lib64/libginkgo.so" ]; then
+    echo "Error: libginkgo.so not found in $GINKGO_ROOT/lib or $GINKGO_ROOT/lib64"
+    exit 1
+fi
+
+# Adjust library path if using lib64
+if [ -d "$GINKGO_ROOT/lib64" ]; then
+    export GINKGO_ROOT_LIB="$GINKGO_ROOT/lib64"
+else
+    export GINKGO_ROOT_LIB="$GINKGO_ROOT/lib"
+fi
+
+echo "Building OGL with Ginkgo from: $GINKGO_ROOT"
+echo ""
+
+# Build the library
+cd src
+wmake libso
+
+echo ""
+echo "OGL build complete."
+echo ""
+echo "To use OGL in your simulation, add to system/controlDict:"
+echo '  libs ("libOGL.so");'
+echo ""
+echo "And configure your pressure solver in system/fvSolution:"
+echo '  p'
+echo '  {'
+echo '      solver          OGLPCG;'
+echo '      tolerance       1e-6;'
+echo '      relTol          0.01;'
+echo ''
+echo '      OGLCoeffs'
+echo '      {'
+echo '          precisionPolicy     FP32;'
+echo '          iterativeRefinement on;'
+echo '          maxRefineIters      3;'
+echo '          cacheStructure      true;'
+echo '          cacheValues         false;'
+echo '      }'
+echo '  }'
+
+#------------------------------------------------------------------------------

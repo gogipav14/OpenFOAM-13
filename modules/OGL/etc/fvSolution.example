@@ -1,0 +1,87 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+Description
+    Example fvSolution configuration for GPU-accelerated pressure solve
+    using OGL (OpenFOAM Ginkgo Layer)
+
+\*---------------------------------------------------------------------------*/
+
+solvers
+{
+    // GPU-accelerated pressure solver
+    p
+    {
+        solver          OGLPCG;     // GPU PCG solver
+        tolerance       1e-6;
+        relTol          0.01;
+
+        OGLCoeffs
+        {
+            // Precision policy: FP64, FP32, or MIXED
+            precisionPolicy     FP32;
+
+            // Iterative refinement: FP32 solve + FP64 residual correction
+            // Recommended ON for mathematical correctness
+            iterativeRefinement on;
+
+            // Maximum refinement iterations (usually 1-3 is sufficient)
+            maxRefineIters      3;
+
+            // Inner tolerance for FP32 solve (looser than final)
+            innerTolerance      1e-4;
+
+            // Cache CSR structure between solves
+            // Set true for static meshes, false if topology changes
+            cacheStructure      true;
+
+            // Cache matrix values between solves
+            // Set false for time-varying coefficients or NCC/AMI
+            cacheValues         false;
+
+            // Debug output level (0=off, 1=basic, 2=verbose)
+            debug               0;
+
+            // Enable timing instrumentation
+            timing              false;
+        }
+    }
+
+    // Final iteration with tighter tolerance
+    pFinal
+    {
+        $p;
+        relTol          0;
+    }
+
+    // Velocity solver (keep on CPU for asymmetric matrices)
+    "(U|UFinal)"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+
+    // Turbulence quantities (keep on CPU)
+    "(k|epsilon|omega|nuTilda).*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-8;
+        relTol          0.1;
+    }
+}
+
+PIMPLE
+{
+    nOuterCorrectors    2;
+    nCorrectors         2;
+    nNonOrthogonalCorrectors 1;
+}
+
+// ************************************************************************* //

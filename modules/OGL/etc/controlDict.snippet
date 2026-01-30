@@ -1,0 +1,20 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+Description
+    Example controlDict snippet for loading OGL (OpenFOAM Ginkgo Layer)
+
+\*---------------------------------------------------------------------------*/
+
+// Add to your system/controlDict:
+libs ("libOGL.so");
+
+// For multi-GPU runs, set environment before mpirun:
+// export CUDA_VISIBLE_DEVICES=$OMPI_COMM_WORLD_LOCAL_RANK  (OpenMPI)
+// export CUDA_VISIBLE_DEVICES=$MV2_COMM_WORLD_LOCAL_RANK   (MVAPICH2)
+
+// ************************************************************************* //
