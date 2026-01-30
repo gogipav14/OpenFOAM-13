@@ -13,6 +13,9 @@ OGLOperator/HaloExchange.C
 /* Mixed precision */
 OGLMixedPrecision/FP32CastWrapper.C
 
+/* Utils */
+OGLUtils/PerformanceTimer.C
+
 /* Solvers */
 OGLSolvers/OGLSolverBase/OGLSolverBase.C
 OGLSolvers/OGLPCGSolver/OGLPCGSolver.C

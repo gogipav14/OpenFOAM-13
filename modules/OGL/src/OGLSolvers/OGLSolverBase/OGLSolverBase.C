@@ -134,19 +134,22 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithRefinement
     const label nCells = psi.size();
 
     // Compute initial residual in FP64
-    scalar residualNorm = computeResidualNorm(psi, source, cmpt);
-    solverPerf.initialResidual() = residualNorm;
-    solverPerf.finalResidual() = residualNorm;
-
-    if (debug_ >= 1)
     {
-        Info<< "OGL: Initial residual = " << residualNorm << endl;
-    }
+        ScopedTimer t(timer_, PerformanceTimer::Category::REFINEMENT_RESIDUAL);
+        scalar residualNorm = computeResidualNorm(psi, source, cmpt);
+        solverPerf.initialResidual() = residualNorm;
+        solverPerf.finalResidual() = residualNorm;
 
-    // Check if already converged
-    if (residualNorm < tolerance_)
-    {
-        return solverPerf;
+        if (debug_ >= 1)
+        {
+            Info<< "OGL: Initial residual = " << residualNorm << endl;
+        }
+
+        // Check if already converged
+        if (residualNorm < tolerance_)
+        {
+            return solverPerf;
+        }
     }
 
     // Iterative refinement loop
@@ -156,12 +159,20 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithRefinement
     {
         // Compute FP64 residual: r = b - A*x
         scalarField Apsi(nCells);
-        matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
-        scalarField residual(source - Apsi);
+        scalarField residual(nCells);
+        {
+            ScopedTimer t(timer_, PerformanceTimer::Category::REFINEMENT_RESIDUAL);
+            matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
+            residual = source - Apsi;
+        }
 
         // Solve correction in FP32: A*dx = r
         scalarField dx(nCells, 0.0);
-        label iters = solveFP32(dx, residual, innerTolerance_);
+        label iters;
+        {
+            ScopedTimer t(timer_, PerformanceTimer::Category::SOLVE_KERNEL);
+            iters = solveFP32(dx, residual, innerTolerance_);
+        }
         totalIters += iters;
 
         // Apply correction in FP64: x = x + dx
@@ -171,7 +182,11 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithRefinement
         }
 
         // Compute new residual in FP64
-        residualNorm = computeResidualNorm(psi, source, cmpt);
+        scalar residualNorm;
+        {
+            ScopedTimer t(timer_, PerformanceTimer::Category::REFINEMENT_RESIDUAL);
+            residualNorm = computeResidualNorm(psi, source, cmpt);
+        }
         solverPerf.finalResidual() = residualNorm;
 
         if (debug_ >= 1)
@@ -232,9 +247,13 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     cacheStructure_(true),
     cacheValues_(false),
     debug_(0),
-    timing_(false)
+    timing_(false),
+    timer_(false)
 {
     readOGLControls();
+
+    // Initialize timer with timing flag
+    timer_.setEnabled(timing_);
 
     // Ensure executor is initialized
     if (!OGLExecutor::initialized())
@@ -255,25 +274,31 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solve
     const direction cmpt
 ) const
 {
+    // Start total solve timer
+    ScopedTimer totalTimer(timer_, PerformanceTimer::Category::TOTAL_SOLVE);
+
+    solverPerformance solverPerf;
+
     // Choose solve path based on precision policy
     switch (precisionPolicy_)
     {
         case PrecisionPolicy::FP64:
         {
             // Pure FP64 solve
-            solverPerformance solverPerf(typeName + ":FP64", fieldName_);
+            solverPerf = solverPerformance(typeName + ":FP64", fieldName_);
 
             scalar initResidual = computeResidualNorm(psi, source, cmpt);
             solverPerf.initialResidual() = initResidual;
 
             if (initResidual >= tolerance_)
             {
+                ScopedTimer t(timer_, PerformanceTimer::Category::SOLVE_KERNEL);
                 label iters = solveFP64(psi, source, tolerance_);
                 solverPerf.nIterations() = iters;
             }
 
             solverPerf.finalResidual() = computeResidualNorm(psi, source, cmpt);
-            return solverPerf;
+            break;
         }
 
         case PrecisionPolicy::FP32:
@@ -281,31 +306,40 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solve
         {
             if (iterativeRefinement_)
             {
-                return solveWithRefinement(psi, source, cmpt);
+                solverPerf = solveWithRefinement(psi, source, cmpt);
             }
             else
             {
                 // FP32 without refinement (not recommended for production)
-                solverPerformance solverPerf(typeName + ":FP32", fieldName_);
+                solverPerf = solverPerformance(typeName + ":FP32", fieldName_);
 
                 scalar initResidual = computeResidualNorm(psi, source, cmpt);
                 solverPerf.initialResidual() = initResidual;
 
                 if (initResidual >= tolerance_)
                 {
+                    ScopedTimer t(timer_, PerformanceTimer::Category::SOLVE_KERNEL);
                     label iters = solveFP32(psi, source, tolerance_);
                     solverPerf.nIterations() = iters;
                 }
 
                 solverPerf.finalResidual() =
                     computeResidualNorm(psi, source, cmpt);
-                return solverPerf;
             }
+            break;
         }
     }
 
-    // Should never reach here
-    return solverPerformance(typeName, fieldName_);
+    return solverPerf;
+}
+
+
+void Foam::OGL::OGLSolverBase::reportPerformance() const
+{
+    if (timing_)
+    {
+        timer_.report(fieldName_);
+    }
 }
 
 

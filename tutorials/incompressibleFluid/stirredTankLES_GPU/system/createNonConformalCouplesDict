@@ -1,0 +1,37 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      createNonConformalCouplesDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Non-conformal cyclic interfaces between stationary and rotating zones
+
+fields          (p U tracer);
+
+nonConformalCouples
+{
+    // Bottom interface: below impeller zone
+    impeller_bottom
+    {
+        patches         (AMI_bottom AMI_bottom);
+        transform       none;
+    }
+
+    // Top interface: above impeller zone
+    impeller_top
+    {
+        patches         (AMI_top AMI_top);
+        transform       none;
+    }
+}
+
+// ************************************************************************* //
