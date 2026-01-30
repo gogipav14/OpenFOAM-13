@@ -1,0 +1,23 @@
+/* OGL Build Options */
+
+GINKGO_DIR = $(GINKGO_ROOT)
+
+EXE_INC = \
+    -I$(LIB_SRC)/OpenFOAM/lnInclude \
+    -I$(LIB_SRC)/finiteVolume/lnInclude \
+    -I$(LIB_SRC)/meshTools/lnInclude \
+    -I$(GINKGO_DIR)/include \
+    -IOGLExecutor \
+    -IOGLMatrix \
+    -IOGLOperator \
+    -IOGLMixedPrecision \
+    -IOGLSolvers/OGLSolverBase \
+    -IOGLSolvers/OGLPCGSolver
+
+LIB_LIBS = \
+    -lOpenFOAM \
+    -lfiniteVolume \
+    -lmeshTools \
+    -L$(GINKGO_DIR)/lib \
+    -lginkgo \
+    -Wl,-rpath,$(GINKGO_DIR)/lib
