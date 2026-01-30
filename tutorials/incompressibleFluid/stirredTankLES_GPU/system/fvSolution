@@ -1,0 +1,96 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    // GPU-accelerated pressure solver with mixed precision
+    p
+    {
+        solver          OGLPCG;
+        tolerance       1e-6;
+        relTol          0.01;
+
+        OGLCoeffs
+        {
+            precisionPolicy     FP32;
+            iterativeRefinement on;
+            maxRefineIters      2;
+            innerTolerance      1e-4;
+            cacheStructure      true;
+            cacheValues         false;  // NCC interface values change each step
+            debug               0;
+            timing              true;   // Enable performance logging
+        }
+    }
+
+    pFinal
+    {
+        $p;
+        relTol          0;
+    }
+
+    "pcorr.*"
+    {
+        $p;
+        tolerance       0.02;
+        relTol          0;
+    }
+
+    // Velocity solver (kept on CPU - asymmetric matrix)
+    "(U|UFinal)"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+
+    // Passive tracer for mixing time measurement
+    "(tracer|tracerFinal)"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-8;
+        relTol          0.01;
+    }
+}
+
+PIMPLE
+{
+    nOuterCorrectors    2;
+    nCorrectors         2;
+    nNonOrthogonalCorrectors 1;
+
+    consistent          yes;
+
+    residualControl
+    {
+        p
+        {
+            tolerance   1e-4;
+            relTol      0;
+        }
+    }
+}
+
+relaxationFactors
+{
+    equations
+    {
+        ".*"            1;
+    }
+}
+
+// ************************************************************************* //

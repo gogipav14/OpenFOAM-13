@@ -1,0 +1,231 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Stirred tank geometry parameters
+// Tank diameter: 0.3 m
+// Tank height: 0.3 m
+// Impeller diameter: 0.1 m (D/T = 1/3)
+// Impeller clearance: 0.1 m from bottom
+
+convertToMeters 1;
+
+// Radii
+R   0.15;       // Tank radius
+Ri  0.05;       // Inner cylinder radius (impeller shaft region)
+
+// Heights
+H   0.30;       // Tank height
+Hi1 0.08;       // Below impeller
+Hi2 0.12;       // Impeller zone top (impeller at 0.1 m)
+
+// Mesh resolution
+nRadial   20;
+nAxialLow 16;
+nAxialMid 8;
+nAxialTop 16;
+nCirc     32;
+
+// Calculated points
+// Inner cylinder points
+xi #calc "$Ri * cos(degToRad(45))";
+yi #calc "$Ri * sin(degToRad(45))";
+
+// Outer cylinder points
+xo #calc "$R * cos(degToRad(45))";
+yo #calc "$R * sin(degToRad(45))";
+
+vertices
+(
+    // Bottom plane z=0
+    // Inner square (for O-grid)
+    ( $xi -$yi 0)       // 0
+    ( $xi  $yi 0)       // 1
+    (-$xi  $yi 0)       // 2
+    (-$xi -$yi 0)       // 3
+
+    // Outer ring
+    ( $R   0   0)       // 4
+    ( 0    $R  0)       // 5
+    (-$R   0   0)       // 6
+    ( 0   -$R  0)       // 7
+
+    // Mid-low plane z=Hi1 (below impeller)
+    ( $xi -$yi $Hi1)    // 8
+    ( $xi  $yi $Hi1)    // 9
+    (-$xi  $yi $Hi1)    // 10
+    (-$xi -$yi $Hi1)    // 11
+    ( $R   0   $Hi1)    // 12
+    ( 0    $R  $Hi1)    // 13
+    (-$R   0   $Hi1)    // 14
+    ( 0   -$R  $Hi1)    // 15
+
+    // Mid-high plane z=Hi2 (above impeller)
+    ( $xi -$yi $Hi2)    // 16
+    ( $xi  $yi $Hi2)    // 17
+    (-$xi  $yi $Hi2)    // 18
+    (-$xi -$yi $Hi2)    // 19
+    ( $R   0   $Hi2)    // 20
+    ( 0    $R  $Hi2)    // 21
+    (-$R   0   $Hi2)    // 22
+    ( 0   -$R  $Hi2)    // 23
+
+    // Top plane z=H
+    ( $xi -$yi $H)      // 24
+    ( $xi  $yi $H)      // 25
+    (-$xi  $yi $H)      // 26
+    (-$xi -$yi $H)      // 27
+    ( $R   0   $H)      // 28
+    ( 0    $R  $H)      // 29
+    (-$R   0   $H)      // 30
+    ( 0   -$R  $H)      // 31
+);
+
+blocks
+(
+    // Bottom section (z=0 to z=Hi1)
+    // Central core
+    hex (3 0 1 2 11 8 9 10) ($nCirc $nCirc $nAxialLow) simpleGrading (1 1 1)
+    // Outer blocks (+x)
+    hex (0 4 5 1 8 12 13 9) ($nRadial $nCirc $nAxialLow) simpleGrading (1 1 1)
+    // (+y)
+    hex (1 5 6 2 9 13 14 10) ($nRadial $nCirc $nAxialLow) simpleGrading (1 1 1)
+    // (-x)
+    hex (2 6 7 3 10 14 15 11) ($nRadial $nCirc $nAxialLow) simpleGrading (1 1 1)
+    // (-y)
+    hex (3 7 4 0 11 15 12 8) ($nRadial $nCirc $nAxialLow) simpleGrading (1 1 1)
+
+    // Impeller section (z=Hi1 to z=Hi2) - this will be the rotating zone
+    hex (11 8 9 10 19 16 17 18) impeller ($nCirc $nCirc $nAxialMid) simpleGrading (1 1 1)
+    hex (8 12 13 9 16 20 21 17) impeller ($nRadial $nCirc $nAxialMid) simpleGrading (1 1 1)
+    hex (9 13 14 10 17 21 22 18) impeller ($nRadial $nCirc $nAxialMid) simpleGrading (1 1 1)
+    hex (10 14 15 11 18 22 23 19) impeller ($nRadial $nCirc $nAxialMid) simpleGrading (1 1 1)
+    hex (11 15 12 8 19 23 20 16) impeller ($nRadial $nCirc $nAxialMid) simpleGrading (1 1 1)
+
+    // Top section (z=Hi2 to z=H)
+    hex (19 16 17 18 27 24 25 26) ($nCirc $nCirc $nAxialTop) simpleGrading (1 1 1)
+    hex (16 20 21 17 24 28 29 25) ($nRadial $nCirc $nAxialTop) simpleGrading (1 1 1)
+    hex (17 21 22 18 25 29 30 26) ($nRadial $nCirc $nAxialTop) simpleGrading (1 1 1)
+    hex (18 22 23 19 26 30 31 27) ($nRadial $nCirc $nAxialTop) simpleGrading (1 1 1)
+    hex (19 23 20 16 27 31 28 24) ($nRadial $nCirc $nAxialTop) simpleGrading (1 1 1)
+);
+
+edges
+(
+    // Bottom plane arcs
+    arc 4 5 (  $xo  $yo 0)
+    arc 5 6 ( -$xo  $yo 0)
+    arc 6 7 ( -$xo -$yo 0)
+    arc 7 4 (  $xo -$yo 0)
+
+    // Mid-low plane arcs
+    arc 12 13 (  $xo  $yo $Hi1)
+    arc 13 14 ( -$xo  $yo $Hi1)
+    arc 14 15 ( -$xo -$yo $Hi1)
+    arc 15 12 (  $xo -$yo $Hi1)
+
+    // Mid-high plane arcs
+    arc 20 21 (  $xo  $yo $Hi2)
+    arc 21 22 ( -$xo  $yo $Hi2)
+    arc 22 23 ( -$xo -$yo $Hi2)
+    arc 23 20 (  $xo -$yo $Hi2)
+
+    // Top plane arcs
+    arc 28 29 (  $xo  $yo $H)
+    arc 29 30 ( -$xo  $yo $H)
+    arc 30 31 ( -$xo -$yo $H)
+    arc 31 28 (  $xo -$yo $H)
+);
+
+boundary
+(
+    bottom
+    {
+        type wall;
+        faces
+        (
+            (3 2 1 0)
+            (0 1 5 4)
+            (1 2 6 5)
+            (2 3 7 6)
+            (3 0 4 7)
+        );
+    }
+
+    top
+    {
+        type patch;
+        faces
+        (
+            (24 25 26 27)
+            (24 28 29 25)
+            (25 29 30 26)
+            (26 30 31 27)
+            (27 31 28 24)
+        );
+    }
+
+    wall
+    {
+        type wall;
+        faces
+        (
+            // Bottom section walls
+            (4 12 13 5)
+            (5 13 14 6)
+            (6 14 15 7)
+            (7 15 12 4)
+            // Impeller section walls
+            (12 20 21 13)
+            (13 21 22 14)
+            (14 22 23 15)
+            (15 23 20 12)
+            // Top section walls
+            (20 28 29 21)
+            (21 29 30 22)
+            (22 30 31 23)
+            (23 31 28 20)
+        );
+    }
+
+    // NCC interfaces (bottom of impeller zone to top of bottom zone)
+    AMI_bottom
+    {
+        type patch;
+        faces
+        (
+            (11 10 9 8)
+            (8 9 13 12)
+            (9 10 14 13)
+            (10 11 15 14)
+            (11 8 12 15)
+        );
+    }
+
+    // NCC interfaces (top of impeller zone to bottom of top zone)
+    AMI_top
+    {
+        type patch;
+        faces
+        (
+            (16 17 18 19)
+            (16 20 21 17)
+            (17 21 22 18)
+            (18 22 23 19)
+            (19 23 20 16)
+        );
+    }
+);
+
+// ************************************************************************* //

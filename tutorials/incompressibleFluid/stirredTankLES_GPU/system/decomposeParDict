@@ -1,0 +1,42 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      decomposeParDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Number of subdomains = number of GPUs
+numberOfSubdomains  4;
+
+method          scotch;
+
+// Constraints for better load balancing with rotating zone
+constraints
+{
+    // Preserve NCC interface patches
+    preservePatches
+    {
+        type    preservePatches;
+        patches (AMI_bottom AMI_top);
+    }
+
+    // Try to keep impeller zone cells together (optional)
+    // Uncomment for better GPU utilization if impeller zone is small
+    /*
+    singleProcessorFaceSets
+    {
+        type    singleProcessorFaceSets;
+        sets    ();
+    }
+    */
+}
+
+// ************************************************************************* //

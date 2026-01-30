@@ -1,0 +1,130 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Load OGL GPU solver library
+libs ("libOGL.so");
+
+application     foamRun;
+
+solver          incompressibleFluid;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         5;  // 5 seconds of physical time
+
+deltaT          1e-4;
+
+writeControl    adjustableRunTime;
+
+writeInterval   0.1;
+
+purgeWrite      5;
+
+writeFormat     binary;
+
+writePrecision  8;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable yes;
+
+adjustTimeStep  yes;
+
+maxCo           0.5;
+
+maxDeltaT       1e-3;
+
+functions
+{
+    fieldAverage
+    {
+        type            fieldAverage;
+        libs            ("libfieldFunctionObjects.so");
+        writeControl    writeTime;
+
+        fields
+        (
+            U
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+            p
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+            tracer
+            {
+                mean        on;
+                prime2Mean  off;
+                base        time;
+            }
+        );
+    }
+
+    mixingQuality
+    {
+        type            volFieldValue;
+        libs            ("libfieldFunctionObjects.so");
+        writeControl    timeStep;
+        writeInterval   100;
+        writeFields     false;
+        log             true;
+        operation       CoV;  // Coefficient of variation
+
+        fields
+        (
+            tracer
+        );
+
+        regionType      all;
+    }
+
+    probes
+    {
+        type            probes;
+        libs            ("libsampling.so");
+        writeControl    timeStep;
+        writeInterval   10;
+
+        probeLocations
+        (
+            (0 0 0.15)          // Center
+            (0.1 0 0.15)        // Near wall
+            (0 0 0.05)          // Bottom
+            (0 0 0.25)          // Top
+        );
+
+        fields
+        (
+            U
+            p
+            tracer
+        );
+    }
+}
+
+// ************************************************************************* //

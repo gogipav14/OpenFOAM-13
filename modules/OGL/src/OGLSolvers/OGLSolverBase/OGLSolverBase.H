@@ -46,6 +46,7 @@ SourceFiles
 #include "lduMatrix.H"
 #include "FoamGinkgoLinOp.H"
 #include "FP32CastWrapper.H"
+#include "PerformanceTimer.H"
 
 #include <ginkgo/ginkgo.hpp>
 
@@ -104,6 +105,9 @@ protected:
 
         //- Enable timing instrumentation
         bool timing_;
+
+        //- Performance timer
+        mutable PerformanceTimer timer_;
 
 
     // Protected Member Functions
@@ -177,6 +181,12 @@ public:
             const scalarField& source,
             const direction cmpt = 0
         ) const override;
+
+        //- Access performance timer
+        PerformanceTimer& timer() const { return timer_; }
+
+        //- Print performance report
+        void reportPerformance() const;
 
 
     // Member Operators
