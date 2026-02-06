@@ -28,6 +28,7 @@ License
 
 #include <algorithm>
 #include <numeric>
+#include <limits>
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
@@ -39,6 +40,18 @@ void Foam::OGL::lduToCSR::buildStructure()
 
     nRows_ = matrix_.diag().size();
     const label nFaces = upperAddr.size();
+
+    // Check for int32 overflow (Ginkgo uses int for indices)
+    // Max non-zeros = nRows (diagonal) + 2*nFaces (upper + lower)
+    const label maxNonZeros = nRows_ + 2*nFaces;
+    if (nRows_ > std::numeric_limits<int>::max() ||
+        maxNonZeros > std::numeric_limits<int>::max())
+    {
+        FatalErrorInFunction
+            << "Matrix too large for Ginkgo int32 indexing: "
+            << "nRows = " << nRows_ << ", max nnz = " << maxNonZeros
+            << abort(FatalError);
+    }
 
     // Count non-zeros per row:
     // Each row has: 1 diagonal + number of off-diagonals
@@ -250,7 +263,11 @@ Foam::OGL::lduToCSR::createGinkgoMatrixF64
             << abort(FatalError);
     }
 
-    // Create Ginkgo arrays on the executor
+    // Note: const_cast is required here because Ginkgo's array::view() requires
+    // non-const pointers, but we immediately call .copy_to_array() which creates
+    // a copy. The original data is never modified. This is a safe pattern:
+    // view -> copy_to_array -> move to GPU executor.
+
     auto rowPtrs = gko::array<int>::view(
         exec->get_master(),
         nRows_ + 1,
@@ -297,7 +314,11 @@ Foam::OGL::lduToCSR::createGinkgoMatrixF32
             << abort(FatalError);
     }
 
-    // Create Ginkgo arrays on the executor
+    // Note: const_cast is required here because Ginkgo's array::view() requires
+    // non-const pointers, but we immediately call .copy_to_array() which creates
+    // a copy. The original data is never modified. This is a safe pattern:
+    // view -> copy_to_array -> move to GPU executor.
+
     auto rowPtrs = gko::array<int>::view(
         exec->get_master(),
         nRows_ + 1,

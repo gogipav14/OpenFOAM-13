@@ -102,6 +102,26 @@ class OGLPCGSolver
 
     // Private Member Functions
 
+        //- Templated solver creation (reduces FP32/FP64 code duplication)
+        template<typename ValueType>
+        void updateSolverImpl
+        (
+            std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
+            std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+            ValueType tolerance
+        ) const;
+
+        //- Templated solve implementation with error handling
+        template<typename ValueType>
+        label solveImpl
+        (
+            scalarField& psi,
+            const scalarField& source,
+            std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
+            std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+            ValueType tolerance
+        ) const;
+
         //- Create/update FP32 operator and solver
         void updateSolverF32() const;
 

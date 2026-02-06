@@ -25,8 +25,11 @@ Class
     Foam::OGL::OGLExecutor
 
 Description
-    Singleton manager for Ginkgo GPU executors. Handles device selection
-    and provides access to CPU and GPU executors for linear algebra operations.
+    Thread-safe singleton manager for Ginkgo GPU executors using Meyer's
+    singleton pattern (C++11 thread-safe static initialization).
+
+    Handles device selection and provides access to CPU and GPU executors
+    for linear algebra operations.
 
     Supports multi-GPU via MPI rank-to-device mapping using environment
     variables (OMPI_COMM_WORLD_LOCAL_RANK, MPI_LOCALRANKID, etc.)
@@ -41,6 +44,10 @@ SourceFiles
 
 #include "dictionary.H"
 #include "label.H"
+
+#include <memory>
+#include <mutex>
+#include <atomic>
 
 // Forward declarations for Ginkgo types
 namespace gko
@@ -72,7 +79,7 @@ class OGLExecutor
         //- Selected device index (-1 for auto)
         label deviceIndex_;
 
-        //- Backend type (cuda, hip, reference)
+        //- Backend type (cuda, hip, omp, reference)
         word backendType_;
 
         //- Whether GPU is available and initialized
@@ -81,13 +88,28 @@ class OGLExecutor
         //- Debug level
         label debug_;
 
+        //- Configuration dictionary (stored for reconfiguration)
+        dictionary config_;
+
+
+    // Private Static Data
+
+        //- Mutex for thread-safe configuration updates
+        static std::mutex configMutex_;
+
+        //- Configuration dictionary for lazy initialization
+        static dictionary configDict_;
+
+        //- Flag indicating if custom config was provided
+        static std::atomic<bool> configProvided_;
+
 
     // Private Member Functions
 
         //- Detect local MPI rank for multi-GPU binding
         label detectLocalRank() const;
 
-        //- Initialize executors
+        //- Initialize executors with error handling
         void initializeExecutors();
 
         //- Disallow default bitwise copy construction
@@ -95,12 +117,6 @@ class OGLExecutor
 
         //- Disallow default bitwise assignment
         void operator=(const OGLExecutor&) = delete;
-
-
-    // Static Data
-
-        //- Singleton instance
-        static OGLExecutor* instancePtr_;
 
 
 public:
@@ -117,17 +133,16 @@ public:
 
     // Static Member Functions
 
-        //- Initialize the singleton with configuration
-        static void initialize(const dictionary& dict);
+        //- Configure the singleton before first use (thread-safe)
+        //  Must be called before instance() if custom configuration needed
+        static void configure(const dictionary& dict);
 
-        //- Access the singleton instance
+        //- Access the singleton instance (thread-safe, lazy initialization)
+        //  Uses Meyer's singleton pattern for thread safety
         static OGLExecutor& instance();
 
         //- Check if singleton is initialized
         static bool initialized();
-
-        //- Destroy the singleton
-        static void destroy();
 
 
     // Member Functions
@@ -170,14 +185,26 @@ public:
                 return deviceIndex_;
             }
 
+            //- Return debug level
+            label debug() const
+            {
+                return debug_;
+            }
+
 
         // Utility
 
-            //- Synchronize GPU operations
+            //- Synchronize GPU operations (waits for all pending work)
             void synchronize() const;
 
             //- Print device information
             void printInfo() const;
+
+            //- Check if Ginkgo operation succeeded, throw on failure
+            static void checkGinkgoError(
+                const std::string& operation,
+                const std::exception& e
+            );
 };
 
 

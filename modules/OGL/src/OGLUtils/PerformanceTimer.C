@@ -66,8 +66,11 @@ Foam::OGL::PerformanceTimer::PerformanceTimer(bool enabled)
 
 void Foam::OGL::PerformanceTimer::reset()
 {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     accumulatedTimes_.clear();
     callCounts_.clear();
+    startTimes_.clear();
 
     // Initialize all categories to zero
     for (const auto& pair : categoryNames_)
@@ -82,6 +85,7 @@ void Foam::OGL::PerformanceTimer::start(Category cat)
 {
     if (!enabled_) return;
 
+    std::lock_guard<std::mutex> lock(mutex_);
     startTimes_[cat] = clockTime();
 }
 
@@ -89,6 +93,8 @@ void Foam::OGL::PerformanceTimer::start(Category cat)
 void Foam::OGL::PerformanceTimer::stop(Category cat)
 {
     if (!enabled_) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = startTimes_.find(cat);
     if (it != startTimes_.end())
@@ -102,6 +108,8 @@ void Foam::OGL::PerformanceTimer::stop(Category cat)
 
 double Foam::OGL::PerformanceTimer::time(Category cat) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     auto it = accumulatedTimes_.find(cat);
     return (it != accumulatedTimes_.end()) ? it->second : 0.0;
 }
@@ -109,6 +117,8 @@ double Foam::OGL::PerformanceTimer::time(Category cat) const
 
 Foam::label Foam::OGL::PerformanceTimer::count(Category cat) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     auto it = callCounts_.find(cat);
     return (it != callCounts_.end()) ? it->second : 0;
 }
@@ -116,6 +126,8 @@ Foam::label Foam::OGL::PerformanceTimer::count(Category cat) const
 
 double Foam::OGL::PerformanceTimer::averageTime(Category cat) const
 {
+    // Note: time() and count() each acquire locks, so we get atomic reads
+    // but not a fully consistent snapshot. This is acceptable for reporting.
     label n = count(cat);
     return (n > 0) ? time(cat) / n : 0.0;
 }
@@ -131,10 +143,19 @@ void Foam::OGL::PerformanceTimer::report(const word& fieldName) const
 {
     if (!enabled_) return;
 
+    // Take a snapshot of the data under lock
+    std::map<Category, double> timesCopy;
+    std::map<Category, label> countsCopy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        timesCopy = accumulatedTimes_;
+        countsCopy = callCounts_;
+    }
+
     Info<< nl << "=== OGL Performance Report: " << fieldName << " ===" << nl;
 
-    double totalTime = time(Category::TOTAL_SOLVE);
-    label totalCalls = count(Category::TOTAL_SOLVE);
+    double totalTime = timesCopy[Category::TOTAL_SOLVE];
+    label totalCalls = countsCopy[Category::TOTAL_SOLVE];
 
     Info<< "Total solves: " << totalCalls << nl;
     Info<< "Total time:   " << totalTime << " s" << nl;
@@ -152,8 +173,8 @@ void Foam::OGL::PerformanceTimer::report(const word& fieldName) const
         Category cat = pair.first;
         if (cat == Category::TOTAL_SOLVE) continue;
 
-        double t = time(cat);
-        label n = count(cat);
+        double t = timesCopy[cat];
+        label n = countsCopy[cat];
 
         if (n > 0)
         {
@@ -173,14 +194,27 @@ void Foam::OGL::PerformanceTimer::report(const word& fieldName) const
 
 Foam::dictionary Foam::OGL::PerformanceTimer::timingDict() const
 {
+    // Take a snapshot of the data under lock
+    std::map<Category, double> timesCopy;
+    std::map<Category, label> countsCopy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        timesCopy = accumulatedTimes_;
+        countsCopy = callCounts_;
+    }
+
     dictionary dict;
 
     for (const auto& pair : categoryNames_)
     {
         dictionary catDict;
-        catDict.add("time", time(pair.first));
-        catDict.add("count", count(pair.first));
-        catDict.add("average", averageTime(pair.first));
+        catDict.add("time", timesCopy[pair.first]);
+        catDict.add("count", countsCopy[pair.first]);
+
+        label n = countsCopy[pair.first];
+        double avg = (n > 0) ? timesCopy[pair.first] / n : 0.0;
+        catDict.add("average", avg);
+
         dict.add(pair.second, catDict);
     }
 
@@ -191,6 +225,8 @@ Foam::dictionary Foam::OGL::PerformanceTimer::timingDict() const
 void Foam::OGL::PerformanceTimer::reduce()
 {
     if (!Pstream::parRun()) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
 
     // Reduce times (take max across processors for bottleneck analysis)
     for (auto& pair : accumulatedTimes_)

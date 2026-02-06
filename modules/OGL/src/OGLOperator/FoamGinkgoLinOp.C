@@ -31,29 +31,38 @@ License
 template<typename ValueType>
 void Foam::OGL::FoamGinkgoLinOp<ValueType>::updateMatrix() const
 {
-    // Check if we need to rebuild structure
-    if (!structureValid_ || !csrConverter_.valid())
+    try
     {
-        csrConverter_.reset(new lduToCSR(matrix_));
-        structureValid_ = cacheStructure_;
-        valuesValid_ = false;
+        // Check if we need to rebuild structure
+        if (!structureValid_ || !csrConverter_.valid())
+        {
+            csrConverter_.reset(new lduToCSR(matrix_));
+            structureValid_ = cacheStructure_;
+            valuesValid_ = false;
+        }
+
+        // Check if we need to update values
+        if (!valuesValid_)
+        {
+            if constexpr (std::is_same<ValueType, float>::value)
+            {
+                csrConverter_->updateValuesF32();
+                localMatrix_ = csrConverter_->createGinkgoMatrixF32(this->get_executor());
+            }
+            else
+            {
+                csrConverter_->updateValues();
+                localMatrix_ = csrConverter_->createGinkgoMatrixF64(this->get_executor());
+            }
+
+            valuesValid_ = cacheValues_;
+        }
     }
-
-    // Check if we need to update values
-    if (!valuesValid_)
+    catch (const std::exception& e)
     {
-        if (std::is_same<ValueType, float>::value)
-        {
-            csrConverter_->updateValuesF32();
-            localMatrix_ = csrConverter_->createGinkgoMatrixF32(this->get_executor());
-        }
-        else
-        {
-            csrConverter_->updateValues();
-            localMatrix_ = csrConverter_->createGinkgoMatrixF64(this->get_executor());
-        }
-
-        valuesValid_ = cacheValues_;
+        FatalErrorInFunction
+            << "Failed to update CSR matrix: " << e.what()
+            << abort(FatalError);
     }
 }
 
@@ -72,9 +81,19 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::applyInterfaces
 
     // Use OpenFOAM's existing interface update mechanism
     // This handles processor, cyclic, and NCC boundaries correctly
+    //
+    // Note: const_cast is required here because OpenFOAM's interface methods
+    // are non-const (they use internal MPI buffers), but they do not modify
+    // the matrix coefficients. This is a design limitation in OpenFOAM's
+    // lduMatrix interface that we must work around.
+    //
+    // The operation is logically const: we're computing y += A_interface * x
+    // where A_interface represents processor/cyclic/NCC boundary contributions.
+
+    lduMatrix& mutableMatrix = const_cast<lduMatrix&>(matrix_);
 
     // Initialize interface matrix update (starts non-blocking MPI sends)
-    const_cast<lduMatrix&>(matrix_).initMatrixInterfaces
+    mutableMatrix.initMatrixInterfaces
     (
         true,  // add to y
         interfaceBouCoeffs_,
@@ -85,7 +104,7 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::applyInterfaces
     );
 
     // Finalize interface matrix update (waits for MPI, applies contributions)
-    const_cast<lduMatrix&>(matrix_).updateMatrixInterfaces
+    mutableMatrix.updateMatrixInterfaces
     (
         true,  // add to y
         interfaceBouCoeffs_,
@@ -158,50 +177,59 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::apply_impl
     gko::LinOp* x
 ) const
 {
-    // Ensure matrix is up to date
-    updateMatrix();
-
-    const label n = nRows();
-
-    // Cast to dense vectors
-    const auto bDense = gko::as<const Vector>(b);
-    auto xDense = gko::as<Vector>(x);
-
-    // Step 1: Apply local CSR matrix on GPU
-    // y_local = A_local * b
-    localMatrix_->apply(bDense, xDense);
-
-    // Step 2: Apply interface contributions on CPU
-    if (includeInterfaces_ && interfaces_.size() > 0)
+    try
     {
-        // Resize host buffers if needed
-        if (xHost_.size() != n)
+        // Ensure matrix is up to date
+        updateMatrix();
+
+        const label n = nRows();
+
+        // Cast to dense vectors
+        const auto bDense = gko::as<const Vector>(b);
+        auto xDense = gko::as<Vector>(x);
+
+        // Step 1: Apply local CSR matrix on GPU
+        // y_local = A_local * b
+        localMatrix_->apply(bDense, xDense);
+
+        // Step 2: Apply interface contributions on CPU
+        if (includeInterfaces_ && interfaces_.size() > 0)
         {
-            xHost_.setSize(n);
-            yInterface_.setSize(n);
+            // Resize host buffers if needed
+            if (xHost_.size() != n)
+            {
+                xHost_.setSize(n);
+                yInterface_.setSize(n);
+            }
+
+            // Copy x (input) from GPU to CPU
+            copyToHost(bDense, xHost_);
+
+            // Initialize interface result to zero
+            yInterface_ = 0.0;
+
+            // Compute interface contribution: yInterface = A_interface * xHost
+            applyInterfaces(xHost_, yInterface_);
+
+            // Copy current y from GPU, add interface contribution, copy back
+            scalarField yHost(n);
+            copyToHost(xDense, yHost);
+
+            // y = y_local + y_interface
+            forAll(yHost, i)
+            {
+                yHost[i] += yInterface_[i];
+            }
+
+            // Copy result back to GPU
+            copyFromHost(yHost, xDense);
         }
-
-        // Copy x (input) from GPU to CPU
-        copyToHost(bDense, xHost_);
-
-        // Initialize interface result to zero
-        yInterface_ = 0.0;
-
-        // Compute interface contribution: yInterface = A_interface * xHost
-        applyInterfaces(xHost_, yInterface_);
-
-        // Copy current y from GPU, add interface contribution, copy back
-        scalarField yHost(n);
-        copyToHost(xDense, yHost);
-
-        // y = y_local + y_interface
-        forAll(yHost, i)
-        {
-            yHost[i] += yInterface_[i];
-        }
-
-        // Copy result back to GPU
-        copyFromHost(yHost, xDense);
+    }
+    catch (const std::exception& e)
+    {
+        FatalErrorInFunction
+            << "GPU operator apply failed: " << e.what()
+            << abort(FatalError);
     }
 }
 
@@ -215,32 +243,41 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::apply_impl
     gko::LinOp* x
 ) const
 {
-    // For simplicity, implement using the basic apply
-    // y = alpha * A * b + beta * y
+    try
+    {
+        // For simplicity, implement using the basic apply
+        // y = alpha * A * b + beta * y
 
-    // Ensure matrix is up to date
-    updateMatrix();
+        // Ensure matrix is up to date
+        updateMatrix();
 
-    const label n = nRows();
+        const label n = nRows();
 
-    // Cast inputs
-    const auto alphaDense = gko::as<const gko::matrix::Dense<ValueType>>(alpha);
-    const auto betaDense = gko::as<const gko::matrix::Dense<ValueType>>(beta);
-    const auto bDense = gko::as<const Vector>(b);
-    auto xDense = gko::as<Vector>(x);
+        // Cast inputs
+        const auto alphaDense = gko::as<const gko::matrix::Dense<ValueType>>(alpha);
+        const auto betaDense = gko::as<const gko::matrix::Dense<ValueType>>(beta);
+        const auto bDense = gko::as<const Vector>(b);
+        auto xDense = gko::as<Vector>(x);
 
-    // Create temporary for A*b
-    auto temp = Vector::create(this->get_executor(), gko::dim<2>(n, 1));
+        // Create temporary for A*b
+        auto temp = Vector::create(this->get_executor(), gko::dim<2>(n, 1));
 
-    // Compute A*b into temp
-    this->apply(bDense, temp.get());
+        // Compute A*b into temp
+        this->apply(bDense, temp.get());
 
-    // Compute y = alpha * temp + beta * y
-    // Using Ginkgo's scaled add
-    auto one = gko::initialize<gko::matrix::Dense<ValueType>>({1.0}, this->get_executor());
-    xDense->scale(betaDense);
-    temp->scale(alphaDense);
-    xDense->add_scaled(one.get(), temp.get());
+        // Compute y = alpha * temp + beta * y
+        // Using Ginkgo's scaled add
+        auto one = gko::initialize<gko::matrix::Dense<ValueType>>({1.0}, this->get_executor());
+        xDense->scale(betaDense);
+        temp->scale(alphaDense);
+        xDense->add_scaled(one.get(), temp.get());
+    }
+    catch (const std::exception& e)
+    {
+        FatalErrorInFunction
+            << "GPU scaled operator apply failed: " << e.what()
+            << abort(FatalError);
+    }
 }
 
 

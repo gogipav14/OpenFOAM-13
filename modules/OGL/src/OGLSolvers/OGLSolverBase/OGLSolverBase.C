@@ -255,12 +255,12 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     // Initialize timer with timing flag
     timer_.setEnabled(timing_);
 
-    // Ensure executor is initialized
+    // Configure executor before first use (only has effect if not yet initialized)
     if (!OGLExecutor::initialized())
     {
         dictionary defaultDict;
         defaultDict.add("debug", debug_);
-        OGLExecutor::initialize(defaultDict);
+        OGLExecutor::configure(defaultDict);
     }
 }
 

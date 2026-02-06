@@ -54,6 +54,7 @@ SourceFiles
 #include <map>
 #include <string>
 #include <vector>
+#include <mutex>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -89,6 +90,9 @@ public:
 private:
 
     // Private Data
+
+        //- Mutex for thread-safe map access
+        mutable std::mutex mutex_;
 
         //- Whether timing is enabled
         bool enabled_;
