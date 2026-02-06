@@ -47,8 +47,10 @@ SourceFiles
 #include "FoamGinkgoLinOp.H"
 #include "FP32CastWrapper.H"
 #include "PerformanceTimer.H"
+#include "AdaptivePrecision.H"
 
 #include <ginkgo/ginkgo.hpp>
+#include <memory>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -109,6 +111,12 @@ protected:
         //- Performance timer
         mutable PerformanceTimer timer_;
 
+        //- Adaptive precision controller
+        mutable std::unique_ptr<AdaptivePrecision> adaptivePrecision_;
+
+        //- Use adaptive precision switching
+        bool useAdaptivePrecision_;
+
 
     // Protected Member Functions
 
@@ -125,6 +133,14 @@ protected:
 
         //- Solve with iterative refinement (FP32 solve + FP64 correction)
         solverPerformance solveWithRefinement
+        (
+            scalarField& psi,
+            const scalarField& source,
+            const direction cmpt
+        ) const;
+
+        //- Solve with adaptive precision switching
+        solverPerformance solveWithAdaptivePrecision
         (
             scalarField& psi,
             const scalarField& source,

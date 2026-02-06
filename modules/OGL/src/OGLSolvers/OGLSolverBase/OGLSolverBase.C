@@ -94,6 +94,25 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
 
         debug_ = oglDict.lookupOrDefault<label>("debug", 0);
         timing_ = oglDict.lookupOrDefault<bool>("timing", false);
+
+        // Adaptive precision settings
+        useAdaptivePrecision_ = oglDict.lookupOrDefault<bool>
+        (
+            "useAdaptivePrecision",
+            false
+        );
+
+        if (useAdaptivePrecision_ && oglDict.found("adaptivePrecision"))
+        {
+            adaptivePrecision_ = std::make_unique<AdaptivePrecision>
+            (
+                oglDict.subDict("adaptivePrecision")
+            );
+        }
+        else if (useAdaptivePrecision_)
+        {
+            adaptivePrecision_ = std::make_unique<AdaptivePrecision>();
+        }
     }
 }
 
@@ -219,6 +238,131 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithRefinement
 }
 
 
+Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithAdaptivePrecision
+(
+    scalarField& psi,
+    const scalarField& source,
+    const direction cmpt
+) const
+{
+    // Setup performance tracking
+    solverPerformance solverPerf(typeName + ":adaptive", fieldName_);
+
+    const label nCells = psi.size();
+
+    // Reset adaptive precision for new solve
+    adaptivePrecision_->reset();
+    adaptivePrecision_->setTargetTolerance(tolerance_);
+
+    // Compute initial residual in FP64
+    scalar residualNorm;
+    {
+        ScopedTimer t(timer_, PerformanceTimer::Category::REFINEMENT_RESIDUAL);
+        residualNorm = computeResidualNorm(psi, source, cmpt);
+        solverPerf.initialResidual() = residualNorm;
+        solverPerf.finalResidual() = residualNorm;
+
+        if (debug_ >= 1)
+        {
+            Info<< "OGL Adaptive: Initial residual = " << residualNorm << endl;
+        }
+
+        // Check if already converged
+        if (residualNorm < tolerance_)
+        {
+            return solverPerf;
+        }
+    }
+
+    // Adaptive solve loop
+    label totalIters = 0;
+    label iteration = 0;
+
+    for (label refine = 0; refine < maxRefineIters_; refine++)
+    {
+        // Compute FP64 residual: r = b - A*x
+        scalarField Apsi(nCells);
+        scalarField residual(nCells);
+        {
+            ScopedTimer t(timer_, PerformanceTimer::Category::REFINEMENT_RESIDUAL);
+            matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
+            residual = source - Apsi;
+        }
+
+        // Get precision recommendation from adaptive controller
+        AdaptivePrecision::Precision precision =
+            adaptivePrecision_->update(residualNorm, iteration);
+
+        // Solve correction in recommended precision
+        scalarField dx(nCells, 0.0);
+        label iters;
+        {
+            ScopedTimer t(timer_, PerformanceTimer::Category::SOLVE_KERNEL);
+
+            if (precision == AdaptivePrecision::Precision::FP32)
+            {
+                iters = solveFP32(dx, residual, innerTolerance_);
+            }
+            else
+            {
+                iters = solveFP64(dx, residual, innerTolerance_);
+            }
+        }
+        totalIters += iters;
+        iteration++;
+
+        // Apply correction in FP64: x = x + dx
+        forAll(psi, i)
+        {
+            psi[i] += dx[i];
+        }
+
+        // Compute new residual in FP64
+        {
+            ScopedTimer t(timer_, PerformanceTimer::Category::REFINEMENT_RESIDUAL);
+            residualNorm = computeResidualNorm(psi, source, cmpt);
+        }
+        solverPerf.finalResidual() = residualNorm;
+
+        if (debug_ >= 1)
+        {
+            Info<< "OGL Adaptive: Refinement " << refine + 1
+                << ", precision = "
+                << (precision == AdaptivePrecision::Precision::FP32
+                    ? "FP32" : "FP64")
+                << ", iters = " << iters
+                << ", residual = " << residualNorm << endl;
+        }
+
+        // Check convergence
+        if (residualNorm < tolerance_)
+        {
+            break;
+        }
+
+        // Check relative convergence
+        if
+        (
+            relTol_ > 0
+         && residualNorm < relTol_ * solverPerf.initialResidual()
+        )
+        {
+            break;
+        }
+    }
+
+    solverPerf.nIterations() = totalIters;
+
+    // Report adaptive precision statistics
+    if (debug_ >= 1)
+    {
+        adaptivePrecision_->report();
+    }
+
+    return solverPerf;
+}
+
+
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
 Foam::OGL::OGLSolverBase::OGLSolverBase
@@ -248,7 +392,9 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     cacheValues_(false),
     debug_(0),
     timing_(false),
-    timer_(false)
+    timer_(false),
+    adaptivePrecision_(nullptr),
+    useAdaptivePrecision_(false)
 {
     readOGLControls();
 
@@ -304,7 +450,12 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solve
         case PrecisionPolicy::FP32:
         case PrecisionPolicy::MIXED:
         {
-            if (iterativeRefinement_)
+            if (useAdaptivePrecision_ && adaptivePrecision_)
+            {
+                // Use adaptive precision switching
+                solverPerf = solveWithAdaptivePrecision(psi, source, cmpt);
+            }
+            else if (iterativeRefinement_)
             {
                 solverPerf = solveWithRefinement(psi, source, cmpt);
             }

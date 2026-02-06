@@ -48,6 +48,43 @@ solvers
 
             // Enable timing instrumentation
             timing              false;
+
+            // Adaptive precision: dynamically switch FP32/FP64 based on residual
+            useAdaptivePrecision false;
+
+            // Adaptive precision settings (optional)
+            adaptivePrecision
+            {
+                // Strategy: FIXED_FP32, FIXED_FP64, RESIDUAL_BASED,
+                //           TOLERANCE_BASED, HYBRID
+                strategy            RESIDUAL_BASED;
+
+                // Threshold for stagnation detection (ratio > threshold = stagnating)
+                stagnationThreshold 0.95;
+
+                // Number of consecutive stagnating iterations before switching
+                stagnationCount     3;
+
+                // Buffer factor for tolerance-based switching
+                toleranceBuffer     10.0;
+            }
+        }
+    }
+
+    // GPU-accelerated batched solver for vector fields
+    // Solves U.x, U.y, U.z together for better GPU utilization
+    U
+    {
+        solver          OGLBatched;
+        tolerance       1e-6;
+        relTol          0.1;
+
+        OGLCoeffs
+        {
+            precisionPolicy     FP32;
+            batchSize           3;  // For 3D vector fields
+            cacheStructure      true;
+            cacheValues         true;  // U matrix is usually stable
         }
     }
 
@@ -58,13 +95,21 @@ solvers
         relTol          0;
     }
 
-    // Velocity solver (keep on CPU for asymmetric matrices)
-    "(U|UFinal)"
+    // Alternative: CPU velocity solver for asymmetric matrices
+    // Use this instead of OGLBatched when using implicit velocity coupling
+    // or with highly asymmetric discretizations
+    // "(U|UFinal)"
+    // {
+    //     solver          PBiCGStab;
+    //     preconditioner  DILU;
+    //     tolerance       1e-6;
+    //     relTol          0.1;
+    // }
+
+    UFinal
     {
-        solver          PBiCGStab;
-        preconditioner  DILU;
-        tolerance       1e-6;
-        relTol          0.1;
+        $U;
+        relTol          0;
     }
 
     // Turbulence quantities (keep on CPU)
