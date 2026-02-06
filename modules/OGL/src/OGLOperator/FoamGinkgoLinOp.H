@@ -50,6 +50,7 @@ SourceFiles
 #include "FieldField.H"
 #include "lduInterfaceFieldPtrsList.H"
 #include "lduToCSR.H"
+#include "GPUHaloExchange.H"
 
 #include <ginkgo/ginkgo.hpp>
 #include <memory>
@@ -128,8 +129,17 @@ private:
         //- Values are valid
         mutable bool valuesValid_;
 
+        //- Use GPU-resident halo exchange (faster but requires more GPU memory)
+        bool useGPUHaloExchange_;
+
+        //- GPU halo exchange (lazy initialized)
+        mutable std::unique_ptr<GPUHaloExchange<ValueType>> gpuHaloExchange_;
+
 
     // Private Member Functions
+
+        //- Initialize GPU halo exchange if needed
+        void initGPUHaloExchange() const;
 
         //- Build/update the CSR matrix
         void updateMatrix() const;
@@ -188,7 +198,8 @@ public:
             const direction cmpt = 0,
             bool includeInterfaces = true,
             bool cacheStructure = true,
-            bool cacheValues = false
+            bool cacheValues = false,
+            bool useGPUHaloExchange = true  //- Use GPU-resident halo exchange
         );
 
         //- Copy constructor
