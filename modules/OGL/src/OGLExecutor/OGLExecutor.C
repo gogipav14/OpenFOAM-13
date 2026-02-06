@@ -29,10 +29,19 @@ License
 
 #include <ginkgo/ginkgo.hpp>
 #include <cstdlib>
+#include <stdexcept>
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
-Foam::OGL::OGLExecutor* Foam::OGL::OGLExecutor::instancePtr_ = nullptr;
+std::mutex Foam::OGL::OGLExecutor::configMutex_;
+Foam::dictionary Foam::OGL::OGLExecutor::configDict_;
+std::atomic<bool> Foam::OGL::OGLExecutor::configProvided_(false);
+
+// Flag to track initialization (for initialized() check)
+namespace
+{
+    std::atomic<bool> instanceCreated_(false);
+}
 
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
@@ -79,7 +88,7 @@ Foam::label Foam::OGL::OGLExecutor::detectLocalRank() const
         return std::atoi(localRankEnv);
     }
 
-    // Fallback: use global rank mod expected GPUs (not ideal but functional)
+    // Fallback: use global rank mod expected GPUs
     if (debug_ > 0)
     {
         Info<< "OGLExecutor: No local rank environment variable found, "
@@ -92,8 +101,18 @@ Foam::label Foam::OGL::OGLExecutor::detectLocalRank() const
 
 void Foam::OGL::OGLExecutor::initializeExecutors()
 {
-    // Always create CPU reference executor
-    cpuExecutor_ = gko::ReferenceExecutor::create();
+    // Always create CPU reference executor first
+    try
+    {
+        cpuExecutor_ = gko::ReferenceExecutor::create();
+    }
+    catch (const std::exception& e)
+    {
+        FatalErrorInFunction
+            << "Failed to create Ginkgo reference executor: " << e.what()
+            << abort(FatalError);
+    }
+
     backendType_ = "reference";
     gpuAvailable_ = false;
 
@@ -104,30 +123,43 @@ void Foam::OGL::OGLExecutor::initializeExecutors()
         deviceIndex_ = detectLocalRank();
     }
 
-    // Try to create GPU executor
+    // Try to create GPU executor with proper error handling
     #ifdef GKO_COMPILING_CUDA
     try
     {
-        // Check if CUDA device is available
         int numDevices = 0;
-        auto status = cudaGetDeviceCount(&numDevices);
+        auto cudaStatus = cudaGetDeviceCount(&numDevices);
 
-        if (status == cudaSuccess && numDevices > 0)
+        if (cudaStatus == cudaSuccess && numDevices > 0)
         {
             label deviceId = deviceIndex_ % numDevices;
+
+            // Validate device is accessible
+            cudaStatus = cudaSetDevice(deviceId);
+            if (cudaStatus != cudaSuccess)
+            {
+                throw std::runtime_error(
+                    "Failed to set CUDA device " + std::to_string(deviceId)
+                );
+            }
+
             gpuExecutor_ = gko::CudaExecutor::create(
                 deviceId,
                 cpuExecutor_,
                 std::make_shared<gko::CudaAllocator>()
             );
+
             backendType_ = "cuda";
             gpuAvailable_ = true;
             deviceIndex_ = deviceId;
 
             if (debug_ > 0)
             {
+                cudaDeviceProp prop;
+                cudaGetDeviceProperties(&prop, deviceId);
                 Info<< "OGLExecutor: CUDA device " << deviceId
-                    << " of " << numDevices << " initialized" << endl;
+                    << " (" << prop.name << ") initialized"
+                    << ", " << numDevices << " device(s) available" << endl;
             }
         }
     }
@@ -148,23 +180,36 @@ void Foam::OGL::OGLExecutor::initializeExecutors()
         try
         {
             int numDevices = 0;
-            auto status = hipGetDeviceCount(&numDevices);
+            auto hipStatus = hipGetDeviceCount(&numDevices);
 
-            if (status == hipSuccess && numDevices > 0)
+            if (hipStatus == hipSuccess && numDevices > 0)
             {
                 label deviceId = deviceIndex_ % numDevices;
+
+                hipStatus = hipSetDevice(deviceId);
+                if (hipStatus != hipSuccess)
+                {
+                    throw std::runtime_error(
+                        "Failed to set HIP device " + std::to_string(deviceId)
+                    );
+                }
+
                 gpuExecutor_ = gko::HipExecutor::create(
                     deviceId,
                     cpuExecutor_
                 );
+
                 backendType_ = "hip";
                 gpuAvailable_ = true;
                 deviceIndex_ = deviceId;
 
                 if (debug_ > 0)
                 {
+                    hipDeviceProp_t prop;
+                    hipGetDeviceProperties(&prop, deviceId);
                     Info<< "OGLExecutor: HIP device " << deviceId
-                        << " of " << numDevices << " initialized" << endl;
+                        << " (" << prop.name << ") initialized"
+                        << ", " << numDevices << " device(s) available" << endl;
                 }
             }
         }
@@ -216,7 +261,8 @@ Foam::OGL::OGLExecutor::OGLExecutor(const dictionary& dict)
     deviceIndex_(dict.lookupOrDefault<label>("deviceIndex", -1)),
     backendType_("none"),
     gpuAvailable_(false),
-    debug_(dict.lookupOrDefault<label>("debug", 0))
+    debug_(dict.lookupOrDefault<label>("debug", 0)),
+    config_(dict)
 {
     initializeExecutors();
 
@@ -232,54 +278,69 @@ Foam::OGL::OGLExecutor::OGLExecutor(const dictionary& dict)
 Foam::OGL::OGLExecutor::~OGLExecutor()
 {
     // Ensure GPU operations complete before destruction
-    synchronize();
+    try
+    {
+        synchronize();
+    }
+    catch (const std::exception& e)
+    {
+        // Log but don't throw from destructor
+        Warning << "OGLExecutor: Error during shutdown: " << e.what() << endl;
+    }
 
+    // Release executors in correct order
     gpuExecutor_.reset();
     cpuExecutor_.reset();
+
+    instanceCreated_ = false;
 }
 
 
 // * * * * * * * * * * * * * Static Member Functions * * * * * * * * * * * * //
 
-void Foam::OGL::OGLExecutor::initialize(const dictionary& dict)
+void Foam::OGL::OGLExecutor::configure(const dictionary& dict)
 {
-    if (instancePtr_)
+    std::lock_guard<std::mutex> lock(configMutex_);
+
+    if (instanceCreated_)
     {
-        FatalErrorInFunction
-            << "OGLExecutor already initialized"
-            << abort(FatalError);
+        WarningInFunction
+            << "OGLExecutor already initialized, configure() has no effect"
+            << endl;
+        return;
     }
 
-    instancePtr_ = new OGLExecutor(dict);
+    configDict_ = dict;
+    configProvided_ = true;
 }
 
 
 Foam::OGL::OGLExecutor& Foam::OGL::OGLExecutor::instance()
 {
-    if (!instancePtr_)
+    // Meyer's singleton pattern - thread-safe in C++11
+    // Static local variable initialization is guaranteed thread-safe
+
+    // Get configuration (thread-safe)
+    dictionary dict;
     {
-        // Create with default settings if not initialized
-        dictionary defaultDict;
-        instancePtr_ = new OGLExecutor(defaultDict);
+        std::lock_guard<std::mutex> lock(configMutex_);
+        if (configProvided_)
+        {
+            dict = configDict_;
+        }
     }
 
-    return *instancePtr_;
+    // Thread-safe lazy initialization
+    static OGLExecutor instance_(dict);
+    instanceCreated_ = true;
+
+    return instance_;
 }
 
 
 bool Foam::OGL::OGLExecutor::initialized()
 {
-    return instancePtr_ != nullptr;
-}
-
-
-void Foam::OGL::OGLExecutor::destroy()
-{
-    if (instancePtr_)
-    {
-        delete instancePtr_;
-        instancePtr_ = nullptr;
-    }
+    return instanceCreated_;
 }
 
 
@@ -289,7 +350,16 @@ void Foam::OGL::OGLExecutor::synchronize() const
 {
     if (gpuAvailable_ && gpuExecutor_)
     {
-        gpuExecutor_->synchronize();
+        try
+        {
+            gpuExecutor_->synchronize();
+        }
+        catch (const std::exception& e)
+        {
+            FatalErrorInFunction
+                << "GPU synchronization failed: " << e.what()
+                << abort(FatalError);
+        }
     }
 }
 
@@ -297,11 +367,23 @@ void Foam::OGL::OGLExecutor::synchronize() const
 void Foam::OGL::OGLExecutor::printInfo() const
 {
     Info<< "OGLExecutor Information:" << nl
-        << "  Backend:      " << backendType_ << nl
-        << "  GPU Available:" << (gpuAvailable_ ? "yes" : "no") << nl
-        << "  Device Index: " << deviceIndex_ << nl
-        << "  MPI Rank:     " << Pstream::myProcNo() << nl
+        << "  Backend:       " << backendType_ << nl
+        << "  GPU Available: " << (gpuAvailable_ ? "yes" : "no") << nl
+        << "  Device Index:  " << deviceIndex_ << nl
+        << "  MPI Rank:      " << Pstream::myProcNo() << nl
         << endl;
+}
+
+
+void Foam::OGL::OGLExecutor::checkGinkgoError
+(
+    const std::string& operation,
+    const std::exception& e
+)
+{
+    FatalErrorInFunction
+        << "Ginkgo operation '" << operation << "' failed: " << e.what()
+        << abort(FatalError);
 }
 
 

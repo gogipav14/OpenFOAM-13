@@ -28,6 +28,9 @@ License
 #include "FP32CastWrapper.H"
 #include "addToRunTimeSelectionTable.H"
 
+#include <cmath>
+#include <limits>
+
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
 namespace Foam
@@ -44,85 +47,199 @@ namespace OGL
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
-void Foam::OGL::OGLPCGSolver::updateSolverF32() const
+template<typename ValueType>
+void Foam::OGL::OGLPCGSolver::updateSolverImpl
+(
+    std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
+    std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+    ValueType tolerance
+) const
 {
     auto exec = OGLExecutor::instance().executor();
 
-    // Create the linear operator
-    operatorF32_ = std::make_shared<FoamGinkgoLinOp<float>>
+    try
+    {
+        // Create the linear operator
+        op = std::make_shared<FoamGinkgoLinOp<ValueType>>
+        (
+            exec,
+            matrix_,
+            interfaceBouCoeffs_,
+            interfaceIntCoeffs_,
+            interfaces_,
+            0,  // cmpt
+            true,  // includeInterfaces
+            cacheStructure_,
+            cacheValues_
+        );
+
+        // Create Jacobi preconditioner
+        auto precond = gko::preconditioner::Jacobi<ValueType, int>::build()
+            .with_max_block_size(1u)
+            .on(exec);
+
+        // Create CG solver factory
+        auto solverFactory = gko::solver::Cg<ValueType>::build()
+            .with_preconditioner(precond)
+            .with_criteria(
+                gko::stop::Iteration::build()
+                    .with_max_iters(static_cast<gko::size_type>(maxIter_))
+                    .on(exec),
+                gko::stop::ResidualNorm<ValueType>::build()
+                    .with_reduction_factor(tolerance)
+                    .on(exec)
+            )
+            .on(exec);
+
+        // Generate solver from operator
+        solver = solverFactory->generate(op);
+    }
+    catch (const std::exception& e)
+    {
+        OGLExecutor::checkGinkgoError("updateSolverImpl", e);
+    }
+}
+
+
+template<typename ValueType>
+Foam::label Foam::OGL::OGLPCGSolver::solveImpl
+(
+    scalarField& psi,
+    const scalarField& source,
+    std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
+    std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+    ValueType tolerance
+) const
+{
+    auto exec = OGLExecutor::instance().executor();
+    label numIters = 0;
+
+    try
+    {
+        // Update solver if needed
+        if (!solver)
+        {
+            updateSolverImpl(op, solver, tolerance);
+        }
+        else if (!cacheValues_)
+        {
+            // Invalidate values to force update
+            op->invalidateValues();
+        }
+
+        // Convert to Ginkgo vectors using appropriate precision
+        std::shared_ptr<gko::matrix::Dense<ValueType>> b;
+        std::shared_ptr<gko::matrix::Dense<ValueType>> x;
+
+        if constexpr (std::is_same<ValueType, float>::value)
+        {
+            b = FP32CastWrapper::toGinkgoF32(exec, source);
+            x = FP32CastWrapper::toGinkgoF32(exec, psi);
+        }
+        else
+        {
+            b = FP32CastWrapper::toGinkgoF64(exec, source);
+            x = FP32CastWrapper::toGinkgoF64(exec, psi);
+        }
+
+        // Create iteration logger to get iteration count
+        auto logger = gko::log::Convergence<ValueType>::create();
+        solver->add_logger(logger);
+
+        // Solve with error handling
+        solver->apply(b.get(), x.get());
+
+        // Synchronize to ensure solve completed
+        OGLExecutor::instance().synchronize();
+
+        // Get iteration count
+        numIters = static_cast<label>(logger->get_num_iterations());
+
+        // Check if solver converged
+        if (logger->has_converged())
+        {
+            if (debug_ >= 2)
+            {
+                Info<< "OGLPCGSolver: Converged in " << numIters
+                    << " iterations" << endl;
+            }
+        }
+        else
+        {
+            if (debug_ >= 1)
+            {
+                WarningInFunction
+                    << "OGLPCGSolver: Did not converge in " << numIters
+                    << " iterations (max: " << maxIter_ << ")" << endl;
+            }
+        }
+
+        // Remove logger
+        solver->remove_logger(logger.get());
+
+        // Copy solution back
+        if constexpr (std::is_same<ValueType, float>::value)
+        {
+            FP32CastWrapper::fromGinkgoF32(x.get(), psi);
+        }
+        else
+        {
+            FP32CastWrapper::fromGinkgoF64(x.get(), psi);
+        }
+
+        // Numerical safety: check for NaN/Inf in solution
+        bool hasNaN = false;
+        bool hasInf = false;
+        forAll(psi, i)
+        {
+            if (std::isnan(psi[i]))
+            {
+                hasNaN = true;
+                break;
+            }
+            if (std::isinf(psi[i]))
+            {
+                hasInf = true;
+                break;
+            }
+        }
+
+        if (hasNaN)
+        {
+            FatalErrorInFunction
+                << "OGLPCGSolver: NaN detected in solution"
+                << abort(FatalError);
+        }
+
+        if (hasInf)
+        {
+            WarningInFunction
+                << "OGLPCGSolver: Infinity detected in solution" << endl;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        OGLExecutor::checkGinkgoError("solveImpl", e);
+    }
+
+    return numIters;
+}
+
+
+void Foam::OGL::OGLPCGSolver::updateSolverF32() const
+{
+    updateSolverImpl<float>
     (
-        exec,
-        matrix_,
-        interfaceBouCoeffs_,
-        interfaceIntCoeffs_,
-        interfaces_,
-        0,  // cmpt
-        true,  // includeInterfaces
-        cacheStructure_,
-        cacheValues_
+        operatorF32_,
+        solverF32_,
+        static_cast<float>(innerTolerance_)
     );
-
-    // Create Jacobi preconditioner
-    auto precond = gko::preconditioner::Jacobi<float, int>::build()
-        .with_max_block_size(1u)
-        .on(exec);
-
-    // Create CG solver factory
-    auto solverFactory = gko::solver::Cg<float>::build()
-        .with_preconditioner(precond)
-        .with_criteria(
-            gko::stop::Iteration::build()
-                .with_max_iters(static_cast<gko::size_type>(maxIter_))
-                .on(exec),
-            gko::stop::ResidualNorm<float>::build()
-                .with_reduction_factor(static_cast<float>(innerTolerance_))
-                .on(exec)
-        )
-        .on(exec);
-
-    // Generate solver from operator
-    solverF32_ = solverFactory->generate(operatorF32_);
 }
 
 
 void Foam::OGL::OGLPCGSolver::updateSolverF64() const
 {
-    auto exec = OGLExecutor::instance().executor();
-
-    // Create the linear operator
-    operatorF64_ = std::make_shared<FoamGinkgoLinOp<double>>
-    (
-        exec,
-        matrix_,
-        interfaceBouCoeffs_,
-        interfaceIntCoeffs_,
-        interfaces_,
-        0,  // cmpt
-        true,  // includeInterfaces
-        cacheStructure_,
-        cacheValues_
-    );
-
-    // Create Jacobi preconditioner
-    auto precond = gko::preconditioner::Jacobi<double, int>::build()
-        .with_max_block_size(1u)
-        .on(exec);
-
-    // Create CG solver factory
-    auto solverFactory = gko::solver::Cg<double>::build()
-        .with_preconditioner(precond)
-        .with_criteria(
-            gko::stop::Iteration::build()
-                .with_max_iters(static_cast<gko::size_type>(maxIter_))
-                .on(exec),
-            gko::stop::ResidualNorm<double>::build()
-                .with_reduction_factor(tolerance_)
-                .on(exec)
-        )
-        .on(exec);
-
-    // Generate solver from operator
-    solverF64_ = solverFactory->generate(operatorF64_);
+    updateSolverImpl<double>(operatorF64_, solverF64_, tolerance_);
 }
 
 
@@ -135,40 +252,14 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP32
     const scalar tolerance
 ) const
 {
-    auto exec = OGLExecutor::instance().executor();
-
-    // Update solver if needed
-    if (!solverF32_)
-    {
-        updateSolverF32();
-    }
-    else if (!cacheValues_)
-    {
-        // Invalidate values to force update
-        operatorF32_->invalidateValues();
-    }
-
-    // Convert to Ginkgo vectors
-    auto b = FP32CastWrapper::toGinkgoF32(exec, source);
-    auto x = FP32CastWrapper::toGinkgoF32(exec, psi);
-
-    // Create iteration logger to get iteration count
-    auto logger = gko::log::Convergence<float>::create();
-    solverF32_->add_logger(logger);
-
-    // Solve
-    solverF32_->apply(b.get(), x.get());
-
-    // Get iteration count
-    label numIters = static_cast<label>(logger->get_num_iterations());
-
-    // Remove logger
-    solverF32_->remove_logger(logger.get());
-
-    // Copy solution back
-    FP32CastWrapper::fromGinkgoF32(x.get(), psi);
-
-    return numIters;
+    return solveImpl<float>
+    (
+        psi,
+        source,
+        operatorF32_,
+        solverF32_,
+        static_cast<float>(innerTolerance_)
+    );
 }
 
 
@@ -179,40 +270,7 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP64
     const scalar tolerance
 ) const
 {
-    auto exec = OGLExecutor::instance().executor();
-
-    // Update solver if needed
-    if (!solverF64_)
-    {
-        updateSolverF64();
-    }
-    else if (!cacheValues_)
-    {
-        // Invalidate values to force update
-        operatorF64_->invalidateValues();
-    }
-
-    // Convert to Ginkgo vectors
-    auto b = FP32CastWrapper::toGinkgoF64(exec, source);
-    auto x = FP32CastWrapper::toGinkgoF64(exec, psi);
-
-    // Create iteration logger to get iteration count
-    auto logger = gko::log::Convergence<double>::create();
-    solverF64_->add_logger(logger);
-
-    // Solve
-    solverF64_->apply(b.get(), x.get());
-
-    // Get iteration count
-    label numIters = static_cast<label>(logger->get_num_iterations());
-
-    // Remove logger
-    solverF64_->remove_logger(logger.get());
-
-    // Copy solution back
-    FP32CastWrapper::fromGinkgoF64(x.get(), psi);
-
-    return numIters;
+    return solveImpl<double>(psi, source, operatorF64_, solverF64_, tolerance_);
 }
 
 
