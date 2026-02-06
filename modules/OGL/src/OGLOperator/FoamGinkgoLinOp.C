@@ -29,6 +29,23 @@ License
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
 template<typename ValueType>
+void Foam::OGL::FoamGinkgoLinOp<ValueType>::initGPUHaloExchange() const
+{
+    if (!gpuHaloExchange_ && useGPUHaloExchange_ && includeInterfaces_)
+    {
+        gpuHaloExchange_.reset(new GPUHaloExchange<ValueType>
+        (
+            this->get_executor(),
+            matrix_,
+            interfaceBouCoeffs_,
+            interfaces_,
+            cmpt_
+        ));
+    }
+}
+
+
+template<typename ValueType>
 void Foam::OGL::FoamGinkgoLinOp<ValueType>::updateMatrix() const
 {
     try
@@ -192,37 +209,48 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::apply_impl
         // y_local = A_local * b
         localMatrix_->apply(bDense, xDense);
 
-        // Step 2: Apply interface contributions on CPU
+        // Step 2: Apply interface contributions
         if (includeInterfaces_ && interfaces_.size() > 0)
         {
-            // Resize host buffers if needed
-            if (xHost_.size() != n)
+            if (useGPUHaloExchange_)
             {
-                xHost_.setSize(n);
-                yInterface_.setSize(n);
+                // GPU-resident halo exchange path
+                // Only transfers boundary values, not entire vectors
+                initGPUHaloExchange();
+                gpuHaloExchange_->apply(bDense, xDense);
             }
-
-            // Copy x (input) from GPU to CPU
-            copyToHost(bDense, xHost_);
-
-            // Initialize interface result to zero
-            yInterface_ = 0.0;
-
-            // Compute interface contribution: yInterface = A_interface * xHost
-            applyInterfaces(xHost_, yInterface_);
-
-            // Copy current y from GPU, add interface contribution, copy back
-            scalarField yHost(n);
-            copyToHost(xDense, yHost);
-
-            // y = y_local + y_interface
-            forAll(yHost, i)
+            else
             {
-                yHost[i] += yInterface_[i];
-            }
+                // Legacy CPU-based path (3 full vector transfers)
+                // Resize host buffers if needed
+                if (xHost_.size() != n)
+                {
+                    xHost_.setSize(n);
+                    yInterface_.setSize(n);
+                }
 
-            // Copy result back to GPU
-            copyFromHost(yHost, xDense);
+                // Copy x (input) from GPU to CPU
+                copyToHost(bDense, xHost_);
+
+                // Initialize interface result to zero
+                yInterface_ = 0.0;
+
+                // Compute interface contribution: yInterface = A_interface * xHost
+                applyInterfaces(xHost_, yInterface_);
+
+                // Copy current y from GPU, add interface contribution, copy back
+                scalarField yHost(n);
+                copyToHost(xDense, yHost);
+
+                // y = y_local + y_interface
+                forAll(yHost, i)
+                {
+                    yHost[i] += yInterface_[i];
+                }
+
+                // Copy result back to GPU
+                copyFromHost(yHost, xDense);
+            }
         }
     }
     catch (const std::exception& e)
@@ -294,7 +322,8 @@ Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
     const direction cmpt,
     bool includeInterfaces,
     bool cacheStructure,
-    bool cacheValues
+    bool cacheValues,
+    bool useGPUHaloExchange
 )
 :
     gko::EnableLinOp<FoamGinkgoLinOp<ValueType>>(
@@ -314,7 +343,9 @@ Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
     cacheStructure_(cacheStructure),
     cacheValues_(cacheValues),
     structureValid_(false),
-    valuesValid_(false)
+    valuesValid_(false),
+    useGPUHaloExchange_(useGPUHaloExchange),
+    gpuHaloExchange_(nullptr)
 {}
 
 
@@ -338,7 +369,9 @@ Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
     cacheStructure_(other.cacheStructure_),
     cacheValues_(other.cacheValues_),
     structureValid_(false),
-    valuesValid_(false)
+    valuesValid_(false),
+    useGPUHaloExchange_(other.useGPUHaloExchange_),
+    gpuHaloExchange_(nullptr)
 {}
 
 
