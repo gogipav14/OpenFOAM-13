@@ -24,6 +24,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "OGLExecutor.H"
+#include "GinkgoMemoryPool.H"
 #include "messageStream.H"
 #include "Pstream.H"
 
@@ -262,9 +263,44 @@ Foam::OGL::OGLExecutor::OGLExecutor(const dictionary& dict)
     backendType_("none"),
     gpuAvailable_(false),
     debug_(dict.lookupOrDefault<label>("debug", 0)),
-    config_(dict)
+    config_(dict),
+    memoryPool_(nullptr),
+    memoryPoolEnabled_(false)
 {
     initializeExecutors();
+
+    // Initialize memory pool if enabled
+    memoryPoolEnabled_ = dict.lookupOrDefault<bool>("enableMemoryPool", true);
+
+    if (memoryPoolEnabled_ && gpuExecutor_)
+    {
+        dictionary poolDict;
+        if (dict.found("memoryPool"))
+        {
+            poolDict = dict.subDict("memoryPool");
+        }
+
+        try
+        {
+            memoryPool_ = std::make_unique<GinkgoMemoryPool>
+            (
+                gpuExecutor_,
+                poolDict
+            );
+
+            if (debug_ > 0)
+            {
+                Info<< "OGLExecutor: Memory pool initialized" << endl;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            WarningInFunction
+                << "Failed to initialize memory pool: " << e.what()
+                << ", continuing without pooling" << endl;
+            memoryPool_.reset();
+        }
+    }
 
     if (debug_ > 0)
     {
@@ -287,6 +323,15 @@ Foam::OGL::OGLExecutor::~OGLExecutor()
         // Log but don't throw from destructor
         Warning << "OGLExecutor: Error during shutdown: " << e.what() << endl;
     }
+
+    // Report memory pool statistics before cleanup
+    if (memoryPool_ && debug_ > 0)
+    {
+        memoryPool_->report();
+    }
+
+    // Release memory pool before executors (depends on executor)
+    memoryPool_.reset();
 
     // Release executors in correct order
     gpuExecutor_.reset();

@@ -55,6 +55,9 @@ namespace gko
     class Executor;
 }
 
+// Forward declaration
+namespace Foam { namespace OGL { class GinkgoMemoryPool; } }
+
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 namespace Foam
@@ -90,6 +93,12 @@ class OGLExecutor
 
         //- Configuration dictionary (stored for reconfiguration)
         dictionary config_;
+
+        //- Memory pool for GPU allocations
+        std::unique_ptr<GinkgoMemoryPool> memoryPool_;
+
+        //- Whether memory pool is enabled
+        bool memoryPoolEnabled_;
 
 
     // Private Static Data
@@ -189,6 +198,18 @@ public:
             label debug() const
             {
                 return debug_;
+            }
+
+            //- Access memory pool (may be null if disabled)
+            GinkgoMemoryPool* memoryPool() const
+            {
+                return memoryPool_.get();
+            }
+
+            //- Check if memory pool is available
+            bool hasMemoryPool() const
+            {
+                return memoryPool_ != nullptr;
             }
 
 

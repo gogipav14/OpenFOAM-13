@@ -11,8 +11,10 @@ EXE_INC = \
     -IOGLMatrix \
     -IOGLOperator \
     -IOGLMixedPrecision \
+    -IOGLUtils \
     -IOGLSolvers/OGLSolverBase \
-    -IOGLSolvers/OGLPCGSolver
+    -IOGLSolvers/OGLPCGSolver \
+    -IOGLSolvers/OGLBatchedSolver
 
 LIB_LIBS = \
     -lOpenFOAM \
