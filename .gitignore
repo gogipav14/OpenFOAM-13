@@ -87,3 +87,5 @@ doc/Doxygen/DTAGS
 
 # Ignore the tutorialsTest directory
 /tutorialsTest
+__pycache__/
+*.pyc
