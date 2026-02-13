@@ -321,6 +321,64 @@ functions
 
         regionType      all;
     }}
+
+    // ------------------------------------------------------------------
+    // 9. Horizontal slice through impeller plane (for visualization)
+    // ------------------------------------------------------------------
+    horizontalSlice
+    {{
+        type            surfaces;
+        libs            ("libsampling.so");
+        writeControl    writeTime;
+        surfaceFormat   vtk;
+        interpolationScheme cellPoint;
+
+        fields
+        (
+            U
+            p
+            tracer
+        );
+
+        surfaces
+        (
+            zSlice
+            {{
+                type        cuttingPlane;
+                point       ({cofr_x} {cofr_y} {cofr_z});
+                normal      (0 0 1);
+            }}
+        );
+    }}
+
+    // ------------------------------------------------------------------
+    // 10. Vertical slice through impeller axis (for visualization)
+    // ------------------------------------------------------------------
+    verticalSlice
+    {{
+        type            surfaces;
+        libs            ("libsampling.so");
+        writeControl    writeTime;
+        surfaceFormat   vtk;
+        interpolationScheme cellPoint;
+
+        fields
+        (
+            U
+            p
+            tracer
+        );
+
+        surfaces
+        (
+            ySlice
+            {{
+                type        cuttingPlane;
+                point       ({cofr_x} {cofr_y} 0);
+                normal      (0 1 0);
+            }}
+        );
+    }}
 }}
 
 // ************************************************************************* //

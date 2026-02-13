@@ -8,6 +8,7 @@ Usage:
     python -m mixfoam setup <reactor> <config> [options]
     python -m mixfoam run <case_dir> [--parallel] [--nprocs N]
     python -m mixfoam results <case_dir> [options]
+    python -m mixfoam report <case_dir> [--output report.html]
 """
 
 import argparse
@@ -147,6 +148,19 @@ def cmd_results(args):
     print_results(results)
 
 
+def cmd_report(args):
+    """Generate an HTML visualization report."""
+    from .report import generate_report
+
+    output = args.output
+    if output is None:
+        output = str(Path(args.case_dir) / "report.html")
+
+    html_path = generate_report(args.case_dir, output)
+    print(f"\nReport generated: {html_path}")
+    print(f"Open in browser to view interactive plots.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="mixfoam",
@@ -208,6 +222,13 @@ def main():
     sub_results.add_argument("--volume", type=float, required=True,
                              help="Fill volume in liters")
 
+    # --- report ---
+    sub_report = subparsers.add_parser("report",
+                                        help="Generate HTML visualization report")
+    sub_report.add_argument("case_dir", help="Path to case directory")
+    sub_report.add_argument("--output", "-o", default=None,
+                            help="Output HTML file (default: <case_dir>/report.html)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -220,6 +241,7 @@ def main():
         "setup": cmd_setup,
         "run": cmd_run,
         "results": cmd_results,
+        "report": cmd_report,
     }
     cmd_map[args.command](args)
 

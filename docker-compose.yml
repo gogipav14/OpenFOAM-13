@@ -1,0 +1,15 @@
+services:
+  mixfoam:
+    build: .
+    image: mixfoam:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ./cases:/work
+    stdin_open: true
+    tty: true
