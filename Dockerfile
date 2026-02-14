@@ -2,6 +2,7 @@
 # Multi-stage Dockerfile for OpenFOAM 13 + Ginkgo (GPU) + OGL + MixFOAM
 # =============================================================================
 # Build:   docker build -t mixfoam:latest .
+# Ada:     docker build --build-arg CUDA_ARCHS="75;80;86;89" -t mixfoam:latest .
 # Run:     docker run --rm --gpus all -v ./cases:/work -it mixfoam:latest
 # =============================================================================
 
@@ -10,6 +11,7 @@
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 
+ARG CUDA_ARCHS="75"
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Build-time dependencies
@@ -28,20 +30,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         wget \
         ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
 
 # Allow MPI to run as root inside the container
 ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
     OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 
-# ---- Ginkgo v1.8.0 with CUDA (SM75, SM80, SM86, SM89) --------------------
-RUN git clone --depth 1 --branch v1.8.0 \
+# ---- Ginkgo v1.8.0 with CUDA ------------------------------------------------
+# Build for SM75 (Turing/T500) only to keep compile time and memory usage down.
+# To target additional GPUs, add architectures: "75;80;86;89"
+# GIT_SSL_NO_VERIFY works around missing CA bundle in nvidia/cuda base image.
+# -j4 limits parallelism to avoid OOM during heavy CUDA template compilation.
+RUN GIT_SSL_NO_VERIFY=1 git clone --depth 1 --branch v1.8.0 \
         https://github.com/ginkgo-project/ginkgo.git /tmp/ginkgo-src \
     && cmake -S /tmp/ginkgo-src -B /tmp/ginkgo-build \
         -DCMAKE_INSTALL_PREFIX=/opt/ginkgo \
         -DCMAKE_BUILD_TYPE=Release \
         -DGINKGO_BUILD_CUDA=ON \
-        -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89" \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
         -DGINKGO_BUILD_REFERENCE=ON \
         -DGINKGO_BUILD_OMP=ON \
         -DGINKGO_BUILD_TESTS=OFF \
@@ -68,7 +75,7 @@ RUN /bin/bash -c '\
     export SCOTCH_TYPE=system && \
     source /opt/OpenFOAM-13/etc/bashrc && \
     cd /opt/OpenFOAM-13 && \
-    ./Allwmake -j$(nproc) 2>&1 | tail -40'
+    ./Allwmake -j"$(nproc)" 2>&1 | tail -40'
 
 # ---- OGL (OpenFOAM Ginkgo Layer) ------------------------------------------
 ENV GINKGO_ROOT=/opt/ginkgo
