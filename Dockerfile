@@ -2,14 +2,14 @@
 # Multi-stage Dockerfile for OpenFOAM 13 + Ginkgo (GPU) + OGL + MixFOAM
 # =============================================================================
 # Build:   docker build -t mixfoam:latest .
-# Ada:     docker build --build-arg CUDA_ARCHS="75;80;86;89" -t mixfoam:latest .
+# Multi:   docker build --build-arg CUDA_ARCHS="75;80;86;89;120" -t mixfoam:latest .
 # Run:     docker run --rm --gpus all -v ./cases:/work -it mixfoam:latest
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Stage 1: builder – compile OpenFOAM, Ginkgo, and OGL from source
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
 ARG CUDA_ARCHS="75"
 ENV DEBIAN_FRONTEND=noninteractive
@@ -91,7 +91,7 @@ RUN /bin/bash -c '\
 # ---------------------------------------------------------------------------
 # Stage 2: runtime – lean image with only what is needed to run simulations
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
