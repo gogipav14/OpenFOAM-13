@@ -28,24 +28,15 @@ License
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
-namespace Foam
-{
-namespace OGL
-{
-    template<>
-    const char* NamedEnum<AdaptivePrecision::Strategy, 5>::names[] =
-    {
-        "FIXED_FP32",
-        "FIXED_FP64",
-        "RESIDUAL_BASED",
-        "TOLERANCE_BASED",
-        "HYBRID"
-    };
-}
-}
-
 const Foam::NamedEnum<Foam::OGL::AdaptivePrecision::Strategy, 5>
-Foam::OGL::AdaptivePrecision::strategyNames;
+Foam::OGL::AdaptivePrecision::strategyNames
+({
+    "FIXED_FP32",
+    "FIXED_FP64",
+    "RESIDUAL_BASED",
+    "TOLERANCE_BASED",
+    "HYBRID"
+});
 
 
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //

@@ -28,6 +28,8 @@ License
 #include "lduInterfaceField.H"
 #include "processorLduInterfaceField.H"
 #include "Pstream.H"
+#include "IPstream.H"
+#include "OPstream.H"
 
 #include <cstdlib>
 
@@ -98,15 +100,14 @@ void Foam::OGL::GPUHaloExchange<ValueType>::initializeBuffers()
             // Copy face cell indices to GPU
             // Note: const_cast needed for Ginkgo array view, but data is
             // immediately copied so original is not modified
-            auto faceCellsHost = gko::array<int>::view(
+            auto faceCellsView = gko::array<int>::view(
                 cpuExec_,
                 size,
                 const_cast<int*>(
                     reinterpret_cast<const int*>(faceCells.cdata())
                 )
-            ).copy_to_array();
-            faceCellsHost.set_executor(exec_);
-            faceCellsGPU_[i] = std::move(faceCellsHost);
+            );
+            faceCellsGPU_[i] = gko::array<int>(exec_, faceCellsView);
 
             // Allocate GPU send/receive buffers
             sendBuffersGPU_[i] = Vector::create(exec_, gko::dim<2>(size, 1));
@@ -261,39 +262,61 @@ void Foam::OGL::GPUHaloExchange<ValueType>::exchange() const
         }
     }
 
-    // Step 2: Use OpenFOAM's interface mechanism for MPI exchange
-    forAll(interfaces_, i)
+    // Step 2: Exchange boundary values via MPI
+    // Use direct Pstream calls rather than OpenFOAM's interface methods
+    // because those methods perform their own gathering which is redundant
+    // (we already gathered in the GPU gather step)
     {
-        if (interfaces_.set(i))
+        label nReqsBefore = UPstream::nRequests();
+
+        forAll(interfaces_, i)
         {
-            const lduInterfaceField& intf = interfaces_[i];
+            if (interfaces_.set(i))
+            {
+                if (isA<processorLduInterfaceField>(interfaces_[i]))
+                {
+                    const processorLduInterfaceField& procIntf =
+                        refCast<const processorLduInterfaceField>
+                        (interfaces_[i]);
 
-            // Initiate send
-            intf.initInterfaceMatrixUpdate
-            (
-                sendBuffersHost_[i],
-                interfaces_,
-                Pstream::defaultCommsType
-            );
+                    // Post non-blocking receive from neighbor
+                    UIPstream::read
+                    (
+                        Pstream::commsTypes::nonBlocking,
+                        procIntf.neighbProcNo(),
+                        reinterpret_cast<char*>
+                        (
+                            recvBuffersHost_[i].begin()
+                        ),
+                        recvBuffersHost_[i].byteSize(),
+                        UPstream::msgType(),
+                        procIntf.comm()
+                    );
+
+                    // Post non-blocking send to neighbor
+                    UOPstream::write
+                    (
+                        Pstream::commsTypes::nonBlocking,
+                        procIntf.neighbProcNo(),
+                        reinterpret_cast<const char*>
+                        (
+                            sendBuffersHost_[i].begin()
+                        ),
+                        sendBuffersHost_[i].byteSize(),
+                        UPstream::msgType(),
+                        procIntf.comm()
+                    );
+                }
+                else
+                {
+                    // Non-processor interface (e.g. cyclic within same proc)
+                    recvBuffersHost_[i] = sendBuffersHost_[i];
+                }
+            }
         }
-    }
 
-    // Finalize communication
-    forAll(interfaces_, i)
-    {
-        if (interfaces_.set(i))
-        {
-            const lduInterfaceField& intf = interfaces_[i];
-
-            // Complete receive
-            intf.updateInterfaceMatrix
-            (
-                recvBuffersHost_[i],
-                sendBuffersHost_[i],
-                interfaces_,
-                Pstream::defaultCommsType
-            );
-        }
+        // Wait for all MPI communication to complete
+        UPstream::waitRequests(nReqsBefore);
     }
 
     // Step 3: Copy receive buffers from host to GPU

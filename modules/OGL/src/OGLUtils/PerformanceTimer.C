@@ -25,6 +25,7 @@ License
 
 #include "PerformanceTimer.H"
 #include "Pstream.H"
+#include "PstreamReduceOps.H"
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -215,7 +216,7 @@ Foam::dictionary Foam::OGL::PerformanceTimer::timingDict() const
         double avg = (n > 0) ? timesCopy[pair.first] / n : 0.0;
         catDict.add("average", avg);
 
-        dict.add(pair.second, catDict);
+        dict.add(word(pair.second), catDict);
     }
 
     return dict;

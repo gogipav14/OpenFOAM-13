@@ -148,7 +148,7 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithRefinement
 ) const
 {
     // Setup performance tracking
-    solverPerformance solverPerf(typeName + ":FP32", fieldName_);
+    solverPerformance solverPerf(type() + ":FP32", fieldName_);
 
     const label nCells = psi.size();
 
@@ -246,7 +246,7 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solveWithAdaptivePrecision
 ) const
 {
     // Setup performance tracking
-    solverPerformance solverPerf(typeName + ":adaptive", fieldName_);
+    solverPerformance solverPerf(type() + ":adaptive", fieldName_);
 
     const label nCells = psi.size();
 
@@ -431,7 +431,7 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solve
         case PrecisionPolicy::FP64:
         {
             // Pure FP64 solve
-            solverPerf = solverPerformance(typeName + ":FP64", fieldName_);
+            solverPerf = solverPerformance(type() + ":FP64", fieldName_);
 
             scalar initResidual = computeResidualNorm(psi, source, cmpt);
             solverPerf.initialResidual() = initResidual;
@@ -462,7 +462,7 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solve
             else
             {
                 // FP32 without refinement (not recommended for production)
-                solverPerf = solverPerformance(typeName + ":FP32", fieldName_);
+                solverPerf = solverPerformance(type() + ":FP32", fieldName_);
 
                 scalar initResidual = computeResidualNorm(psi, source, cmpt);
                 solverPerf.initialResidual() = initResidual;

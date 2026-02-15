@@ -61,7 +61,7 @@ SourceFiles
 
 #include "dictionary.H"
 
-#include <ginkgo/ginkgo.hpp>
+#include "GinkgoCompat.H"
 #include <memory>
 #include <mutex>
 #include <unordered_map>

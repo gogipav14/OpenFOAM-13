@@ -263,33 +263,30 @@ Foam::OGL::lduToCSR::createGinkgoMatrixF64
             << abort(FatalError);
     }
 
-    // Note: const_cast is required here because Ginkgo's array::view() requires
-    // non-const pointers, but we immediately call .copy_to_array() which creates
-    // a copy. The original data is never modified. This is a safe pattern:
-    // view -> copy_to_array -> move to GPU executor.
+    // Create array views over host data, then copy to owning arrays on the
+    // target executor.  Ginkgo v1.8 does not have copy_to_array(); instead
+    // we use the array copy-constructor which deep-copies the view.
 
-    auto rowPtrs = gko::array<int>::view(
+    auto rowPtrsView = gko::array<int>::view(
         exec->get_master(),
         nRows_ + 1,
         const_cast<int*>(rowPointers_.data())
-    ).copy_to_array();
+    );
+    gko::array<int> rowPtrs(exec, rowPtrsView);
 
-    auto colIdxs = gko::array<int>::view(
+    auto colIdxsView = gko::array<int>::view(
         exec->get_master(),
         nNonZeros_,
         const_cast<int*>(colIndices_.data())
-    ).copy_to_array();
+    );
+    gko::array<int> colIdxs(exec, colIdxsView);
 
-    auto vals = gko::array<double>::view(
+    auto valsView = gko::array<double>::view(
         exec->get_master(),
         nNonZeros_,
         const_cast<double*>(valuesF64_.data())
-    ).copy_to_array();
-
-    // Move arrays to target executor and create matrix
-    rowPtrs.set_executor(exec);
-    colIdxs.set_executor(exec);
-    vals.set_executor(exec);
+    );
+    gko::array<double> vals(exec, valsView);
 
     return CsrMatrixF64::create(
         exec,
@@ -314,33 +311,26 @@ Foam::OGL::lduToCSR::createGinkgoMatrixF32
             << abort(FatalError);
     }
 
-    // Note: const_cast is required here because Ginkgo's array::view() requires
-    // non-const pointers, but we immediately call .copy_to_array() which creates
-    // a copy. The original data is never modified. This is a safe pattern:
-    // view -> copy_to_array -> move to GPU executor.
-
-    auto rowPtrs = gko::array<int>::view(
+    auto rowPtrsView = gko::array<int>::view(
         exec->get_master(),
         nRows_ + 1,
         const_cast<int*>(rowPointers_.data())
-    ).copy_to_array();
+    );
+    gko::array<int> rowPtrs(exec, rowPtrsView);
 
-    auto colIdxs = gko::array<int>::view(
+    auto colIdxsView = gko::array<int>::view(
         exec->get_master(),
         nNonZeros_,
         const_cast<int*>(colIndices_.data())
-    ).copy_to_array();
+    );
+    gko::array<int> colIdxs(exec, colIdxsView);
 
-    auto vals = gko::array<float>::view(
+    auto valsView = gko::array<float>::view(
         exec->get_master(),
         nNonZeros_,
         const_cast<float*>(valuesF32_.data())
-    ).copy_to_array();
-
-    // Move arrays to target executor and create matrix
-    rowPtrs.set_executor(exec);
-    colIdxs.set_executor(exec);
-    vals.set_executor(exec);
+    );
+    gko::array<float> vals(exec, valsView);
 
     return CsrMatrixF32::create(
         exec,

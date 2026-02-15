@@ -70,7 +70,7 @@ SourceFiles
 #include "OGLSolverBase.H"
 #include "FoamGinkgoLinOp.H"
 
-#include <ginkgo/ginkgo.hpp>
+#include "GinkgoCompat.H"
 #include <vector>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //

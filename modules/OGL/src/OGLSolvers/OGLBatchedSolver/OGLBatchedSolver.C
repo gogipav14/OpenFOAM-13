@@ -130,24 +130,30 @@ Foam::label Foam::OGL::OGLBatchedSolver::solveFP32
     auto x = FP32CastWrapper::toGinkgoF32(exec, psi);
 
     // Create and run solver
-    auto precond = gko::preconditioner::Jacobi<float, int>::build()
-        .with_max_block_size(1u)
-        .on(exec);
+    auto precond = gko::share(
+        gko::preconditioner::Jacobi<float, int>::build()
+            .with_max_block_size(1u)
+            .on(exec)
+    );
 
     auto solver = gko::solver::Cg<float>::build()
         .with_preconditioner(precond)
         .with_criteria(
-            gko::stop::Iteration::build()
-                .with_max_iters(static_cast<gko::size_type>(maxIter_))
-                .on(exec),
-            gko::stop::ResidualNorm<float>::build()
-                .with_reduction_factor(static_cast<float>(tolerance))
-                .on(exec)
+            gko::share(
+                gko::stop::Iteration::build()
+                    .with_max_iters(static_cast<gko::size_type>(maxIter_))
+                    .on(exec)
+            ),
+            gko::share(
+                gko::stop::ResidualNorm<float>::build()
+                    .with_reduction_factor(static_cast<float>(tolerance))
+                    .on(exec)
+            )
         )
         .on(exec)
-        ->generate(operatorF32_);
+        ->generate(operatorF32_->localMatrix());
 
-    auto logger = gko::log::Convergence<float>::create();
+    auto logger = gko::share(gko::log::Convergence<float>::create());
     solver->add_logger(logger);
 
     solver->apply(b.get(), x.get());
@@ -192,24 +198,30 @@ Foam::label Foam::OGL::OGLBatchedSolver::solveFP64
     auto x = FP32CastWrapper::toGinkgoF64(exec, psi);
 
     // Create and run solver
-    auto precond = gko::preconditioner::Jacobi<double, int>::build()
-        .with_max_block_size(1u)
-        .on(exec);
+    auto precond = gko::share(
+        gko::preconditioner::Jacobi<double, int>::build()
+            .with_max_block_size(1u)
+            .on(exec)
+    );
 
     auto solver = gko::solver::Cg<double>::build()
         .with_preconditioner(precond)
         .with_criteria(
-            gko::stop::Iteration::build()
-                .with_max_iters(static_cast<gko::size_type>(maxIter_))
-                .on(exec),
-            gko::stop::ResidualNorm<double>::build()
-                .with_reduction_factor(tolerance)
-                .on(exec)
+            gko::share(
+                gko::stop::Iteration::build()
+                    .with_max_iters(static_cast<gko::size_type>(maxIter_))
+                    .on(exec)
+            ),
+            gko::share(
+                gko::stop::ResidualNorm<double>::build()
+                    .with_reduction_factor(tolerance)
+                    .on(exec)
+            )
         )
         .on(exec)
-        ->generate(operatorF64_);
+        ->generate(operatorF64_->localMatrix());
 
-    auto logger = gko::log::Convergence<double>::create();
+    auto logger = gko::share(gko::log::Convergence<double>::create());
     solver->add_logger(logger);
 
     solver->apply(b.get(), x.get());

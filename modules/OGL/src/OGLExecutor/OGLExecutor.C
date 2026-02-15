@@ -28,7 +28,7 @@ License
 #include "messageStream.H"
 #include "Pstream.H"
 
-#include <ginkgo/ginkgo.hpp>
+#include "GinkgoCompat.H"
 #include <cstdlib>
 #include <stdexcept>
 
@@ -124,107 +124,65 @@ void Foam::OGL::OGLExecutor::initializeExecutors()
         deviceIndex_ = detectLocalRank();
     }
 
-    // Try to create GPU executor with proper error handling
-    #ifdef GKO_COMPILING_CUDA
+    // Try to create GPU executor using Ginkgo runtime detection.
+    // Ginkgo headers always declare CudaExecutor/HipExecutor; the actual
+    // GPU code lives in libginkgo_cuda.so / libginkgo_hip.so.  If no
+    // device is present, create() throws and we fall through gracefully.
+
+    // Try CUDA first
     try
     {
-        int numDevices = 0;
-        auto cudaStatus = cudaGetDeviceCount(&numDevices);
+        gpuExecutor_ = gko::CudaExecutor::create(
+            deviceIndex_,
+            cpuExecutor_
+        );
 
-        if (cudaStatus == cudaSuccess && numDevices > 0)
+        backendType_ = "cuda";
+        gpuAvailable_ = true;
+
+        if (debug_ > 0)
         {
-            label deviceId = deviceIndex_ % numDevices;
-
-            // Validate device is accessible
-            cudaStatus = cudaSetDevice(deviceId);
-            if (cudaStatus != cudaSuccess)
-            {
-                throw std::runtime_error(
-                    "Failed to set CUDA device " + std::to_string(deviceId)
-                );
-            }
-
-            gpuExecutor_ = gko::CudaExecutor::create(
-                deviceId,
-                cpuExecutor_,
-                std::make_shared<gko::CudaAllocator>()
-            );
-
-            backendType_ = "cuda";
-            gpuAvailable_ = true;
-            deviceIndex_ = deviceId;
-
-            if (debug_ > 0)
-            {
-                cudaDeviceProp prop;
-                cudaGetDeviceProperties(&prop, deviceId);
-                Info<< "OGLExecutor: CUDA device " << deviceId
-                    << " (" << prop.name << ") initialized"
-                    << ", " << numDevices << " device(s) available" << endl;
-            }
+            Info<< "OGLExecutor: CUDA device " << deviceIndex_
+                << " initialized" << endl;
         }
     }
     catch (const std::exception& e)
     {
         if (debug_ > 0)
         {
-            Warning
-                << "OGLExecutor: CUDA initialization failed: " << e.what()
-                << ", falling back to CPU" << endl;
+            Info<< "OGLExecutor: CUDA not available (" << e.what()
+                << "), trying HIP..." << endl;
         }
     }
-    #endif
 
-    #ifdef GKO_COMPILING_HIP
+    // Try HIP if CUDA failed
     if (!gpuAvailable_)
     {
         try
         {
-            int numDevices = 0;
-            auto hipStatus = hipGetDeviceCount(&numDevices);
+            gpuExecutor_ = gko::HipExecutor::create(
+                deviceIndex_,
+                cpuExecutor_
+            );
 
-            if (hipStatus == hipSuccess && numDevices > 0)
+            backendType_ = "hip";
+            gpuAvailable_ = true;
+
+            if (debug_ > 0)
             {
-                label deviceId = deviceIndex_ % numDevices;
-
-                hipStatus = hipSetDevice(deviceId);
-                if (hipStatus != hipSuccess)
-                {
-                    throw std::runtime_error(
-                        "Failed to set HIP device " + std::to_string(deviceId)
-                    );
-                }
-
-                gpuExecutor_ = gko::HipExecutor::create(
-                    deviceId,
-                    cpuExecutor_
-                );
-
-                backendType_ = "hip";
-                gpuAvailable_ = true;
-                deviceIndex_ = deviceId;
-
-                if (debug_ > 0)
-                {
-                    hipDeviceProp_t prop;
-                    hipGetDeviceProperties(&prop, deviceId);
-                    Info<< "OGLExecutor: HIP device " << deviceId
-                        << " (" << prop.name << ") initialized"
-                        << ", " << numDevices << " device(s) available" << endl;
-                }
+                Info<< "OGLExecutor: HIP device " << deviceIndex_
+                    << " initialized" << endl;
             }
         }
         catch (const std::exception& e)
         {
             if (debug_ > 0)
             {
-                Warning
-                    << "OGLExecutor: HIP initialization failed: " << e.what()
-                    << ", falling back to CPU" << endl;
+                Info<< "OGLExecutor: HIP not available (" << e.what()
+                    << "), falling back to CPU" << endl;
             }
         }
     }
-    #endif
 
     // If no GPU available, use OMP executor for better CPU performance
     if (!gpuAvailable_)

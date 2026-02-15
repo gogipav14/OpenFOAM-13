@@ -1,11 +1,11 @@
-/* OGL Build Options */
-
 GINKGO_DIR = $(GINKGO_ROOT)
 
 EXE_INC = \
     -I$(LIB_SRC)/OpenFOAM/lnInclude \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/meshTools/lnInclude \
+    -I$(LIB_SRC)/../src/Pstream/mpi/lnInclude \
+    -I$(MPI_ARCH_PATH)/include \
     -I$(GINKGO_DIR)/include \
     -IOGLExecutor \
     -IOGLMatrix \

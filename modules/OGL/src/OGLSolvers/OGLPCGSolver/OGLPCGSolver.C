@@ -73,26 +73,36 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
             cacheValues_
         );
 
-        // Create Jacobi preconditioner
-        auto precond = gko::preconditioner::Jacobi<ValueType, int>::build()
-            .with_max_block_size(1u)
-            .on(exec);
+        // Create Jacobi preconditioner (gko::share converts unique_ptr to
+        // shared_ptr, required by Ginkgo v1.8 solver factory API)
+        auto precond = gko::share(
+            gko::preconditioner::Jacobi<ValueType, int>::build()
+                .with_max_block_size(1u)
+                .on(exec)
+        );
 
         // Create CG solver factory
         auto solverFactory = gko::solver::Cg<ValueType>::build()
             .with_preconditioner(precond)
             .with_criteria(
-                gko::stop::Iteration::build()
-                    .with_max_iters(static_cast<gko::size_type>(maxIter_))
-                    .on(exec),
-                gko::stop::ResidualNorm<ValueType>::build()
-                    .with_reduction_factor(tolerance)
-                    .on(exec)
+                gko::share(
+                    gko::stop::Iteration::build()
+                        .with_max_iters(static_cast<gko::size_type>(maxIter_))
+                        .on(exec)
+                ),
+                gko::share(
+                    gko::stop::ResidualNorm<ValueType>::build()
+                        .with_reduction_factor(tolerance)
+                        .on(exec)
+                )
             )
             .on(exec);
 
-        // Generate solver from operator
-        solver = solverFactory->generate(op);
+        // Generate solver from the local CSR matrix.  Jacobi preconditioner
+        // needs DiagonalLinOpExtractable which CSR supports but the
+        // matrix-free FoamGinkgoLinOp does not.  The outer iterative
+        // refinement loop handles interface contributions in FP64.
+        solver = solverFactory->generate(op->localMatrix());
     }
     catch (const std::exception& e)
     {
@@ -143,7 +153,8 @@ Foam::label Foam::OGL::OGLPCGSolver::solveImpl
         }
 
         // Create iteration logger to get iteration count
-        auto logger = gko::log::Convergence<ValueType>::create();
+        // gko::share converts unique_ptr to shared_ptr for add_logger
+        auto logger = gko::share(gko::log::Convergence<ValueType>::create());
         solver->add_logger(logger);
 
         // Solve with error handling

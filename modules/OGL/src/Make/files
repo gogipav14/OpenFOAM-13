@@ -1,25 +1,16 @@
-/* OGL - OpenFOAM Ginkgo Layer */
-
-/* Executor */
 OGLExecutor/OGLExecutor.C
 
-/* Matrix conversion */
 OGLMatrix/lduToCSR.C
 
-/* Operator */
 OGLOperator/FoamGinkgoLinOp.C
-OGLOperator/HaloExchange.C
 OGLOperator/GPUHaloExchange.C
 
-/* Mixed precision */
 OGLMixedPrecision/FP32CastWrapper.C
 OGLMixedPrecision/AdaptivePrecision.C
 
-/* Utils */
 OGLUtils/PerformanceTimer.C
 OGLUtils/GinkgoMemoryPool.C
 
-/* Solvers */
 OGLSolvers/OGLSolverBase/OGLSolverBase.C
 OGLSolvers/OGLPCGSolver/OGLPCGSolver.C
 OGLSolvers/OGLBatchedSolver/OGLBatchedSolver.C

@@ -65,7 +65,7 @@ echo ""
 
 # Build the library
 cd src
-wmake libso
+wmake libso || exit 1
 
 echo ""
 echo "OGL build complete."

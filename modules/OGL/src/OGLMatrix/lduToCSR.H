@@ -56,7 +56,7 @@ SourceFiles
 #include "scalarField.H"
 #include "labelList.H"
 
-#include <ginkgo/ginkgo.hpp>
+#include "GinkgoCompat.H"
 #include <memory>
 #include <vector>
 

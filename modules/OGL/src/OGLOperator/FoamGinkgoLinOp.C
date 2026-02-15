@@ -36,9 +36,9 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::initGPUHaloExchange() const
         gpuHaloExchange_.reset(new GPUHaloExchange<ValueType>
         (
             this->get_executor(),
-            matrix_,
-            interfaceBouCoeffs_,
-            interfaces_,
+            *matrix_,
+            *interfaceBouCoeffs_,
+            *interfaces_,
             cmpt_
         ));
     }
@@ -53,7 +53,7 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::updateMatrix() const
         // Check if we need to rebuild structure
         if (!structureValid_ || !csrConverter_.valid())
         {
-            csrConverter_.reset(new lduToCSR(matrix_));
+            csrConverter_.reset(new lduToCSR(*matrix_));
             structureValid_ = cacheStructure_;
             valuesValid_ = false;
         }
@@ -107,25 +107,21 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::applyInterfaces
     // The operation is logically const: we're computing y += A_interface * x
     // where A_interface represents processor/cyclic/NCC boundary contributions.
 
-    lduMatrix& mutableMatrix = const_cast<lduMatrix&>(matrix_);
-
     // Initialize interface matrix update (starts non-blocking MPI sends)
-    mutableMatrix.initMatrixInterfaces
+    matrix_->initMatrixInterfaces
     (
-        true,  // add to y
-        interfaceBouCoeffs_,
-        interfaces_,
+        *interfaceBouCoeffs_,
+        *interfaces_,
         x,
         y,
         cmpt_
     );
 
     // Finalize interface matrix update (waits for MPI, applies contributions)
-    mutableMatrix.updateMatrixInterfaces
+    matrix_->updateMatrixInterfaces
     (
-        true,  // add to y
-        interfaceBouCoeffs_,
-        interfaces_,
+        *interfaceBouCoeffs_,
+        *interfaces_,
         x,
         y,
         cmpt_
@@ -210,7 +206,7 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::apply_impl
         localMatrix_->apply(bDense, xDense);
 
         // Step 2: Apply interface contributions
-        if (includeInterfaces_ && interfaces_.size() > 0)
+        if (includeInterfaces_ && interfaces_ && interfaces_->size() > 0)
         {
             if (useGPUHaloExchange_)
             {
@@ -314,6 +310,30 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::apply_impl
 template<typename ValueType>
 Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
 (
+    std::shared_ptr<const gko::Executor> exec
+)
+:
+    gko::EnableLinOp<FoamGinkgoLinOp<ValueType>>(exec, gko::dim<2>(0, 0)),
+    matrix_(nullptr),
+    interfaceBouCoeffs_(nullptr),
+    interfaceIntCoeffs_(nullptr),
+    interfaces_(nullptr),
+    cmpt_(0),
+    csrConverter_(nullptr),
+    localMatrix_(nullptr),
+    includeInterfaces_(false),
+    cacheStructure_(false),
+    cacheValues_(false),
+    structureValid_(false),
+    valuesValid_(false),
+    useGPUHaloExchange_(false),
+    gpuHaloExchange_(nullptr)
+{}
+
+
+template<typename ValueType>
+Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
+(
     std::shared_ptr<const gko::Executor> exec,
     const lduMatrix& matrix,
     const FieldField<Field, scalar>& interfaceBouCoeffs,
@@ -330,10 +350,10 @@ Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
         exec,
         gko::dim<2>(matrix.diag().size(), matrix.diag().size())
     ),
-    matrix_(matrix),
-    interfaceBouCoeffs_(interfaceBouCoeffs),
-    interfaceIntCoeffs_(interfaceIntCoeffs),
-    interfaces_(interfaces),
+    matrix_(&matrix),
+    interfaceBouCoeffs_(&interfaceBouCoeffs),
+    interfaceIntCoeffs_(&interfaceIntCoeffs),
+    interfaces_(&interfaces),
     cmpt_(cmpt),
     csrConverter_(nullptr),
     localMatrix_(nullptr),
@@ -373,6 +393,69 @@ Foam::OGL::FoamGinkgoLinOp<ValueType>::FoamGinkgoLinOp
     useGPUHaloExchange_(other.useGPUHaloExchange_),
     gpuHaloExchange_(nullptr)
 {}
+
+
+template<typename ValueType>
+Foam::OGL::FoamGinkgoLinOp<ValueType>&
+Foam::OGL::FoamGinkgoLinOp<ValueType>::operator=
+(
+    const FoamGinkgoLinOp& other
+)
+{
+    if (this != &other)
+    {
+        gko::EnableLinOp<FoamGinkgoLinOp<ValueType>>::operator=(other);
+        matrix_ = other.matrix_;
+        interfaceBouCoeffs_ = other.interfaceBouCoeffs_;
+        interfaceIntCoeffs_ = other.interfaceIntCoeffs_;
+        interfaces_ = other.interfaces_;
+        cmpt_ = other.cmpt_;
+        csrConverter_.reset();
+        localMatrix_.reset();
+        xHost_.setSize(other.xHost_.size());
+        yInterface_.setSize(other.yInterface_.size());
+        includeInterfaces_ = other.includeInterfaces_;
+        cacheStructure_ = other.cacheStructure_;
+        cacheValues_ = other.cacheValues_;
+        structureValid_ = false;
+        valuesValid_ = false;
+        useGPUHaloExchange_ = other.useGPUHaloExchange_;
+        gpuHaloExchange_.reset();
+    }
+    return *this;
+}
+
+
+template<typename ValueType>
+Foam::OGL::FoamGinkgoLinOp<ValueType>&
+Foam::OGL::FoamGinkgoLinOp<ValueType>::operator=
+(
+    FoamGinkgoLinOp&& other
+)
+{
+    if (this != &other)
+    {
+        gko::EnableLinOp<FoamGinkgoLinOp<ValueType>>::operator=(std::move(other));
+        matrix_ = other.matrix_;
+        interfaceBouCoeffs_ = other.interfaceBouCoeffs_;
+        interfaceIntCoeffs_ = other.interfaceIntCoeffs_;
+        interfaces_ = other.interfaces_;
+        cmpt_ = other.cmpt_;
+        csrConverter_.reset();
+        other.csrConverter_.reset();
+        localMatrix_ = std::move(other.localMatrix_);
+        xHost_.transfer(other.xHost_);
+        yInterface_.transfer(other.yInterface_);
+        includeInterfaces_ = other.includeInterfaces_;
+        cacheStructure_ = other.cacheStructure_;
+        cacheValues_ = other.cacheValues_;
+        structureValid_ = other.structureValid_;
+        valuesValid_ = other.valuesValid_;
+        useGPUHaloExchange_ = other.useGPUHaloExchange_;
+        gpuHaloExchange_ = std::move(other.gpuHaloExchange_);
+    }
+    return *this;
+}
 
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //

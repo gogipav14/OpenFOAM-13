@@ -52,7 +52,7 @@ SourceFiles
 #include "lduToCSR.H"
 #include "GPUHaloExchange.H"
 
-#include <ginkgo/ginkgo.hpp>
+#include "GinkgoCompat.H"
 #include <memory>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
@@ -87,17 +87,17 @@ private:
 
     // Private Data
 
-        //- Reference to the OpenFOAM lduMatrix
-        const lduMatrix& matrix_;
+        //- Pointer to the OpenFOAM lduMatrix (non-owning)
+        const lduMatrix* matrix_;
 
-        //- Interface boundary coefficients
-        const FieldField<Field, scalar>& interfaceBouCoeffs_;
+        //- Interface boundary coefficients (non-owning)
+        const FieldField<Field, scalar>* interfaceBouCoeffs_;
 
-        //- Interface internal coefficients
-        const FieldField<Field, scalar>& interfaceIntCoeffs_;
+        //- Interface internal coefficients (non-owning)
+        const FieldField<Field, scalar>* interfaceIntCoeffs_;
 
-        //- Interface field pointers
-        const lduInterfaceFieldPtrsList& interfaces_;
+        //- Interface field pointers (non-owning)
+        const lduInterfaceFieldPtrsList* interfaces_;
 
         //- Direction component for vector fields
         direction cmpt_;
@@ -168,6 +168,12 @@ private:
 
 protected:
 
+    // Protected Constructors
+
+        //- Construct with only executor (required by Ginkgo CRTP pattern)
+        explicit FoamGinkgoLinOp(std::shared_ptr<const gko::Executor> exec);
+
+
     // Protected Member Functions
 
         //- Apply the operator: y = A * x
@@ -205,6 +211,12 @@ public:
         //- Copy constructor
         FoamGinkgoLinOp(const FoamGinkgoLinOp& other);
 
+        //- Copy assignment (required by Ginkgo's EnablePolymorphicAssignment)
+        FoamGinkgoLinOp& operator=(const FoamGinkgoLinOp& other);
+
+        //- Move assignment (required by Ginkgo's EnablePolymorphicObject)
+        FoamGinkgoLinOp& operator=(FoamGinkgoLinOp&& other);
+
 
     //- Destructor
     virtual ~FoamGinkgoLinOp() = default;
@@ -235,7 +247,7 @@ public:
         //- Number of rows
         label nRows() const
         {
-            return matrix_.diag().size();
+            return matrix_->diag().size();
         }
 
         //- Create a compatible Ginkgo dense vector
