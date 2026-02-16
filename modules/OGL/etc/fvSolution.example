@@ -49,8 +49,17 @@ solvers
             // Enable timing instrumentation
             timing              false;
 
-            // Preconditioner: Jacobi (default), blockJacobi, ISAI,
-            //                 blockJacobiISAI (composite BJ+ISAI)
+            // Preconditioner options:
+            //   Jacobi          - Point Jacobi (diagonal scaling, default)
+            //   blockJacobi     - Block Jacobi (local block coupling)
+            //   ISAI            - Incomplete Sparse Approximate Inverse (SPD)
+            //   blockJacobiISAI - Multiplicative: ISAI * BJ
+            //   bjIsaiSandwich  - Symmetric: BJ * ISAI * BJ
+            //   bjIsaiAdditive  - Additive: BJ + ISAI
+            //   bjIsaiGmres     - Multiplicative: ISAI * BJ (GMRES)
+            //   bjIsaiInnerOuter - FGMRES outer + CG-BJ inner
+            //   FFT             - FFT Laplacian preconditioner (structured grids)
+            //   fftBlockJacobi  - FFT + Block Jacobi additive (structured grids)
             preconditioner      Jacobi;
 
             // Block size for blockJacobi (typical: 4-16)
@@ -59,6 +68,13 @@ solvers
             // ISAI sparsity power (1 = A pattern, 2 = A^2 denser pattern)
             // Higher power = more fill, better approximation, slower setup
             isaiSparsityPower   1;
+
+            // FFT preconditioner settings (required when preconditioner = FFT
+            // or fftBlockJacobi). Uses cuFFT-based diagonalization of the
+            // discrete Laplacian on uniform Cartesian grids.
+            // Grid dimensions must match blockMesh cell counts.
+            // fftDimensions     (35 150 15);   // (nx ny nz)
+            // meshSpacing       (0.00218 0.01453 0.03467); // (dx dy dz)
 
             // Adaptive precision: dynamically switch FP32/FP64 based on residual
             useAdaptivePrecision false;

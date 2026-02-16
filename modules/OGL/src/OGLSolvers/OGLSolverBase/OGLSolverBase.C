@@ -153,13 +153,21 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
         {
             preconditionerType_ = PreconditionerType::BJ_ISAI_INNER_OUTER;
         }
+        else if (precondStr == "FFT")
+        {
+            preconditionerType_ = PreconditionerType::FFT;
+        }
+        else if (precondStr == "fftBlockJacobi")
+        {
+            preconditionerType_ = PreconditionerType::FFT_BLOCK_JACOBI;
+        }
         else
         {
             FatalIOErrorInFunction(oglDict)
                 << "Unknown preconditioner: " << precondStr << nl
                 << "Valid options: Jacobi, blockJacobi, ISAI, "
                 << "blockJacobiISAI, bjIsaiSandwich, bjIsaiAdditive, "
-                << "bjIsaiGmres, bjIsaiInnerOuter"
+                << "bjIsaiGmres, bjIsaiInnerOuter, FFT, fftBlockJacobi"
                 << abort(FatalIOError);
         }
 
@@ -170,6 +178,30 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
             "isaiSparsityPower",
             1
         );
+
+        // FFT preconditioner grid dimensions (required for FFT types)
+        if
+        (
+            preconditionerType_ == PreconditionerType::FFT
+         || preconditionerType_ == PreconditionerType::FFT_BLOCK_JACOBI
+        )
+        {
+            fftDimensions_ = oglDict.lookup<Vector<label>>("fftDimensions");
+            meshSpacing_ = oglDict.lookup<Vector<scalar>>("meshSpacing");
+
+            if (debug_ >= 1)
+            {
+                Info<< "    FFT grid: "
+                    << fftDimensions_.x() << " x "
+                    << fftDimensions_.y() << " x "
+                    << fftDimensions_.z()
+                    << ", spacing: ("
+                    << meshSpacing_.x() << ", "
+                    << meshSpacing_.y() << ", "
+                    << meshSpacing_.z() << ")"
+                    << endl;
+            }
+        }
     }
 }
 
@@ -454,7 +486,9 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     useAdaptivePrecision_(false),
     preconditionerType_(PreconditionerType::JACOBI),
     blockSize_(4),
-    isaiSparsityPower_(1)
+    isaiSparsityPower_(1),
+    fftDimensions_(0, 0, 0),
+    meshSpacing_(0, 0, 0)
 {
     readOGLControls();
 

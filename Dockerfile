@@ -86,6 +86,20 @@ RUN /bin/bash -c '\
     && test -x /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamRun \
     && echo "OpenFOAM build verified OK"
 
+# ---- FFT Preconditioner CUDA kernels --------------------------------------
+# Compile separately with nvcc before OGL build (gcc cannot compile .cu files).
+# The shared library is placed alongside Ginkgo's libs for simple linkage.
+RUN nvcc -O3 -shared -Xcompiler -fPIC \
+    -gencode arch=compute_75,code=sm_75 \
+    -gencode arch=compute_80,code=sm_80 \
+    -gencode arch=compute_86,code=sm_86 \
+    -gencode arch=compute_89,code=sm_89 \
+    -gencode arch=compute_120,code=sm_120 \
+    -o /opt/ginkgo/lib/libfftprecond.so \
+    /opt/OpenFOAM-13/modules/OGL/src/OGLSolvers/OGLSolverBase/FFTKernels.cu \
+    -lcufft \
+    && echo "FFT preconditioner CUDA kernels OK"
+
 # ---- OGL (OpenFOAM Ginkgo Layer) ------------------------------------------
 ENV GINKGO_ROOT=/opt/ginkgo
 

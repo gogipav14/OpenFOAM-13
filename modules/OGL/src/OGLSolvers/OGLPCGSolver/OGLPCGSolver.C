@@ -27,6 +27,7 @@ License
 #include "OGLExecutor.H"
 #include "FP32CastWrapper.H"
 #include "AdditiveLinOp.H"
+#include "FFTPreconditioner.H"
 #include "addToRunTimeSelectionTable.H"
 
 #include <cmath>
@@ -220,6 +221,63 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
                 .with_krylov_dim(100u)
                 .with_flexible(true)
                 .with_preconditioner(innerSolver)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else if (preconditionerType_ == PreconditionerType::FFT)
+        {
+            // FFT Laplacian preconditioner (structured Cartesian grids)
+            auto nCells = static_cast<gko::size_type>(
+                fftDimensions_.x() * fftDimensions_.y() * fftDimensions_.z()
+            );
+            auto fftPrecond = gko::share(
+                FFTPreconditioner<ValueType>::create(
+                    exec,
+                    gko::dim<2>{nCells, nCells},
+                    fftDimensions_.x(),
+                    fftDimensions_.y(),
+                    fftDimensions_.z(),
+                    double(meshSpacing_.x()),
+                    double(meshSpacing_.y()),
+                    double(meshSpacing_.z())
+                )
+            );
+
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_generated_preconditioner(fftPrecond)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else if
+        (
+            preconditionerType_ == PreconditionerType::FFT_BLOCK_JACOBI
+        )
+        {
+            // FFT + Block Jacobi additive (structured Cartesian grids)
+            auto nCells = static_cast<gko::size_type>(
+                fftDimensions_.x() * fftDimensions_.y() * fftDimensions_.z()
+            );
+            auto fft = gko::share(
+                FFTPreconditioner<ValueType>::create(
+                    exec,
+                    gko::dim<2>{nCells, nCells},
+                    fftDimensions_.x(),
+                    fftDimensions_.y(),
+                    fftDimensions_.z(),
+                    double(meshSpacing_.x()),
+                    double(meshSpacing_.y()),
+                    double(meshSpacing_.z())
+                )
+            );
+            auto bj = makeBJ();
+            auto additive = gko::share(
+                AdditiveLinOp<ValueType>::create(fft, bj)
+            );
+
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_generated_preconditioner(additive)
                 .with_criteria(iterCrit, resCrit)
                 .on(exec)
                 ->generate(op->localMatrix());
@@ -497,6 +555,8 @@ Foam::OGL::OGLPCGSolver::OGLPCGSolver
                     case PreconditionerType::BJ_ISAI_ADDITIVE: return "bjIsaiAdditive";
                     case PreconditionerType::BJ_ISAI_GMRES: return "bjIsaiGmres";
                     case PreconditionerType::BJ_ISAI_INNER_OUTER: return "bjIsaiInnerOuter";
+                    case PreconditionerType::FFT: return "FFT";
+                    case PreconditionerType::FFT_BLOCK_JACOBI: return "fftBlockJacobi";
                     default: return "unknown";
                 }
             }()

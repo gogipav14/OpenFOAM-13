@@ -8,3 +8,6 @@ build/
 *.tar.gz
 *.log
 log.*
+benchmarks/preconditioner_results*
+benchmarks/scaling_results*
+papers/

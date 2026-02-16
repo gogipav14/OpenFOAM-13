@@ -89,7 +89,9 @@ public:
             BJ_ISAI_SANDWICH,    // Symmetric: BJ * ISAI * BJ (CG, SPD)
             BJ_ISAI_ADDITIVE,    // Additive: BJ + ISAI (CG, SPD)
             BJ_ISAI_GMRES,       // Multiplicative: ISAI * BJ (GMRES)
-            BJ_ISAI_INNER_OUTER  // FGMRES outer + CG-BJ inner precond
+            BJ_ISAI_INNER_OUTER, // FGMRES outer + CG-BJ inner precond
+            FFT,                 // FFT Laplacian preconditioner (structured)
+            FFT_BLOCK_JACOBI     // FFT + Block Jacobi additive (structured)
         };
 
 
@@ -138,6 +140,12 @@ protected:
 
         //- Sparsity power for ISAI preconditioner
         label isaiSparsityPower_;
+
+        //- Grid dimensions for FFT preconditioner (nx, ny, nz)
+        Vector<label> fftDimensions_;
+
+        //- Mesh spacing for FFT preconditioner (dx, dy, dz)
+        Vector<scalar> meshSpacing_;
 
 
     // Protected Member Functions
