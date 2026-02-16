@@ -49,6 +49,17 @@ solvers
             // Enable timing instrumentation
             timing              false;
 
+            // Preconditioner: Jacobi (default), blockJacobi, ISAI,
+            //                 blockJacobiISAI (composite BJ+ISAI)
+            preconditioner      Jacobi;
+
+            // Block size for blockJacobi (typical: 4-16)
+            blockSize           4;
+
+            // ISAI sparsity power (1 = A pattern, 2 = A^2 denser pattern)
+            // Higher power = more fill, better approximation, slower setup
+            isaiSparsityPower   1;
+
             // Adaptive precision: dynamically switch FP32/FP64 based on residual
             useAdaptivePrecision false;
 

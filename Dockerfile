@@ -18,6 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         flex \
+        libfl-dev \
         bison \
         cmake \
         zlib1g-dev \
@@ -33,9 +34,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
 
-# Allow MPI to run as root inside the container
+# Allow MPI to run as root inside the container.
+# USER must be set so that OpenFOAM's bashrc builds correct FOAM_USER_LIBBIN
+# paths (otherwise $USER is empty and paths like /root/OpenFOAM/-13 result).
 ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
-    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    USER=root
 
 # ---- Ginkgo v1.8.0 with CUDA ------------------------------------------------
 # Build for SM75 (Turing/T500) only to keep compile time and memory usage down.
@@ -55,7 +59,7 @@ RUN GIT_SSL_NO_VERIFY=1 git clone --depth 1 --branch v1.8.0 \
         -DGINKGO_BUILD_BENCHMARKS=OFF \
         -DGINKGO_BUILD_EXAMPLES=OFF \
         -DGINKGO_BUILD_DOC=OFF \
-    && cmake --build /tmp/ginkgo-build -j"$(nproc)" \
+    && cmake --build /tmp/ginkgo-build -j4 \
     && cmake --install /tmp/ginkgo-build \
     && rm -rf /tmp/ginkgo-src /tmp/ginkgo-build
 
@@ -70,23 +74,28 @@ ENV FOAM_INST_DIR=/opt \
     WM_PROJECT_DIR=/opt/OpenFOAM-13
 
 # Compile OpenFOAM
+# Allwmake continues past optional components (zoltan, metis, etc.) so we
+# cannot use pipefail.  Instead, verify key binaries exist afterward.
 RUN /bin/bash -c '\
     export FOAM_INST_DIR=/opt && \
     export SCOTCH_TYPE=system && \
+    export WM_CONTINUE_ON_ERROR=1 && \
     source /opt/OpenFOAM-13/etc/bashrc && \
     cd /opt/OpenFOAM-13 && \
-    ./Allwmake -j"$(nproc)" 2>&1 | tail -40'
+    ./Allwmake -j"$(nproc)" 2>&1 | tail -40' \
+    && test -x /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamRun \
+    && echo "OpenFOAM build verified OK"
 
 # ---- OGL (OpenFOAM Ginkgo Layer) ------------------------------------------
 ENV GINKGO_ROOT=/opt/ginkgo
 
-RUN /bin/bash -c '\
+RUN /bin/bash -o pipefail -c '\
     export FOAM_INST_DIR=/opt && \
     export SCOTCH_TYPE=system && \
     source /opt/OpenFOAM-13/etc/bashrc && \
     export GINKGO_ROOT=/opt/ginkgo && \
     cd /opt/OpenFOAM-13/modules/OGL && \
-    ./Allwmake 2>&1 | tail -20'
+    ./Allwmake 2>&1 | tee /tmp/ogl_build.log | tail -20 && echo "OGL OK" || (grep -E "error:" /tmp/ogl_build.log | head -20 && false)'
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime – lean image with only what is needed to run simulations

@@ -113,6 +113,63 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
         {
             adaptivePrecision_ = std::make_unique<AdaptivePrecision>();
         }
+
+        // Preconditioner type
+        word precondStr = oglDict.lookupOrDefault<word>
+        (
+            "preconditioner",
+            "Jacobi"
+        );
+
+        if (precondStr == "Jacobi")
+        {
+            preconditionerType_ = PreconditionerType::JACOBI;
+        }
+        else if (precondStr == "blockJacobi")
+        {
+            preconditionerType_ = PreconditionerType::BLOCK_JACOBI;
+        }
+        else if (precondStr == "ISAI")
+        {
+            preconditionerType_ = PreconditionerType::ISAI;
+        }
+        else if (precondStr == "blockJacobiISAI")
+        {
+            preconditionerType_ = PreconditionerType::BLOCK_JACOBI_ISAI;
+        }
+        else if (precondStr == "bjIsaiSandwich")
+        {
+            preconditionerType_ = PreconditionerType::BJ_ISAI_SANDWICH;
+        }
+        else if (precondStr == "bjIsaiAdditive")
+        {
+            preconditionerType_ = PreconditionerType::BJ_ISAI_ADDITIVE;
+        }
+        else if (precondStr == "bjIsaiGmres")
+        {
+            preconditionerType_ = PreconditionerType::BJ_ISAI_GMRES;
+        }
+        else if (precondStr == "bjIsaiInnerOuter")
+        {
+            preconditionerType_ = PreconditionerType::BJ_ISAI_INNER_OUTER;
+        }
+        else
+        {
+            FatalIOErrorInFunction(oglDict)
+                << "Unknown preconditioner: " << precondStr << nl
+                << "Valid options: Jacobi, blockJacobi, ISAI, "
+                << "blockJacobiISAI, bjIsaiSandwich, bjIsaiAdditive, "
+                << "bjIsaiGmres, bjIsaiInnerOuter"
+                << abort(FatalIOError);
+        }
+
+        blockSize_ = oglDict.lookupOrDefault<label>("blockSize", 4);
+
+        isaiSparsityPower_ = oglDict.lookupOrDefault<label>
+        (
+            "isaiSparsityPower",
+            1
+        );
     }
 }
 
@@ -394,7 +451,10 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     timing_(false),
     timer_(false),
     adaptivePrecision_(nullptr),
-    useAdaptivePrecision_(false)
+    useAdaptivePrecision_(false),
+    preconditionerType_(PreconditionerType::JACOBI),
+    blockSize_(4),
+    isaiSparsityPower_(1)
 {
     readOGLControls();
 

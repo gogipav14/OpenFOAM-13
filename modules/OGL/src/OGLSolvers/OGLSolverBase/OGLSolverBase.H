@@ -79,6 +79,19 @@ public:
             MIXED       // FP32 solve, FP64 residual check
         };
 
+        //- Preconditioner type for GPU solve
+        enum class PreconditionerType
+        {
+            JACOBI,              // Point Jacobi (diagonal scaling)
+            BLOCK_JACOBI,        // Block Jacobi (local block coupling)
+            ISAI,                // Incomplete Sparse Approximate Inverse (SPD)
+            BLOCK_JACOBI_ISAI,   // Multiplicative: ISAI * BJ (CG)
+            BJ_ISAI_SANDWICH,    // Symmetric: BJ * ISAI * BJ (CG, SPD)
+            BJ_ISAI_ADDITIVE,    // Additive: BJ + ISAI (CG, SPD)
+            BJ_ISAI_GMRES,       // Multiplicative: ISAI * BJ (GMRES)
+            BJ_ISAI_INNER_OUTER  // FGMRES outer + CG-BJ inner precond
+        };
+
 
 protected:
 
@@ -116,6 +129,15 @@ protected:
 
         //- Use adaptive precision switching
         bool useAdaptivePrecision_;
+
+        //- Preconditioner type
+        PreconditionerType preconditionerType_;
+
+        //- Block size for Block Jacobi preconditioner
+        label blockSize_;
+
+        //- Sparsity power for ISAI preconditioner
+        label isaiSparsityPower_;
 
 
     // Protected Member Functions

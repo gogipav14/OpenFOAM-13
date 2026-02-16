@@ -93,11 +93,11 @@ class OGLPCGSolver
         //- Cached FP64 operator
         mutable std::shared_ptr<FoamGinkgoLinOp<double>> operatorF64_;
 
-        //- Cached FP32 solver
-        mutable std::shared_ptr<gko::solver::Cg<float>> solverF32_;
+        //- Cached FP32 solver (LinOp to support both CG and GMRES)
+        mutable std::shared_ptr<gko::LinOp> solverF32_;
 
         //- Cached FP64 solver
-        mutable std::shared_ptr<gko::solver::Cg<double>> solverF64_;
+        mutable std::shared_ptr<gko::LinOp> solverF64_;
 
 
     // Private Member Functions
@@ -107,7 +107,7 @@ class OGLPCGSolver
         void updateSolverImpl
         (
             std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
-            std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+            std::shared_ptr<gko::LinOp>& solver,
             ValueType tolerance
         ) const;
 
@@ -118,7 +118,7 @@ class OGLPCGSolver
             scalarField& psi,
             const scalarField& source,
             std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
-            std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+            std::shared_ptr<gko::LinOp>& solver,
             ValueType tolerance
         ) const;
 

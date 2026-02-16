@@ -26,6 +26,7 @@ License
 #include "OGLPCGSolver.H"
 #include "OGLExecutor.H"
 #include "FP32CastWrapper.H"
+#include "AdditiveLinOp.H"
 #include "addToRunTimeSelectionTable.H"
 
 #include <cmath>
@@ -51,7 +52,7 @@ template<typename ValueType>
 void Foam::OGL::OGLPCGSolver::updateSolverImpl
 (
     std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
-    std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+    std::shared_ptr<gko::LinOp>& solver,
     ValueType tolerance
 ) const
 {
@@ -73,36 +74,202 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
             cacheValues_
         );
 
-        // Create Jacobi preconditioner (gko::share converts unique_ptr to
-        // shared_ptr, required by Ginkgo v1.8 solver factory API)
-        auto precond = gko::share(
-            gko::preconditioner::Jacobi<ValueType, int>::build()
-                .with_max_block_size(1u)
+        // Stopping criteria (shared by all preconditioner paths)
+        auto iterCrit = gko::share(
+            gko::stop::Iteration::build()
+                .with_max_iters(static_cast<gko::size_type>(maxIter_))
+                .on(exec)
+        );
+        auto resCrit = gko::share(
+            gko::stop::ResidualNorm<ValueType>::build()
+                .with_reduction_factor(tolerance)
                 .on(exec)
         );
 
-        // Create CG solver factory
-        auto solverFactory = gko::solver::Cg<ValueType>::build()
-            .with_preconditioner(precond)
-            .with_criteria(
-                gko::share(
-                    gko::stop::Iteration::build()
-                        .with_max_iters(static_cast<gko::size_type>(maxIter_))
-                        .on(exec)
-                ),
-                gko::share(
-                    gko::stop::ResidualNorm<ValueType>::build()
-                        .with_reduction_factor(tolerance)
-                        .on(exec)
-                )
-            )
-            .on(exec);
+        // Create preconditioner and solver based on configuration.
+        // The composite case (BLOCK_JACOBI_ISAI) uses
+        // with_generated_preconditioner() since we need to build both
+        // preconditioners from the matrix first and compose them.
+        // Helper lambdas: build BJ and ISAI from the CSR matrix
+        auto makeBJ = [&]() -> std::shared_ptr<const gko::LinOp>
+        {
+            return gko::preconditioner::Jacobi<ValueType, int>::build()
+                .with_max_block_size(static_cast<unsigned>(blockSize_))
+                .on(exec)
+                ->generate(op->localMatrix());
+        };
 
-        // Generate solver from the local CSR matrix.  Jacobi preconditioner
-        // needs DiagonalLinOpExtractable which CSR supports but the
-        // matrix-free FoamGinkgoLinOp does not.  The outer iterative
-        // refinement loop handles interface contributions in FP64.
-        solver = solverFactory->generate(op->localMatrix());
+        auto makeISAI = [&]() -> std::shared_ptr<const gko::LinOp>
+        {
+            return gko::preconditioner::SpdIsai<ValueType, int>::build()
+                .with_sparsity_power(isaiSparsityPower_)
+                .on(exec)
+                ->generate(op->localMatrix());
+        };
+
+        if (preconditionerType_ == PreconditionerType::BLOCK_JACOBI_ISAI)
+        {
+            // Multiplicative: z = ISAI(BJ(r)) — CG
+            auto bj = makeBJ();
+            auto isai = makeISAI();
+            std::vector<std::shared_ptr<const gko::LinOp>> ops =
+                {isai, bj};
+            auto composed = gko::share(
+                gko::Composition<ValueType>::create(
+                    ops.begin(), ops.end()
+                )
+            );
+
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_generated_preconditioner(composed)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else if
+        (
+            preconditionerType_ == PreconditionerType::BJ_ISAI_SANDWICH
+        )
+        {
+            // Symmetric: z = BJ(ISAI(BJ(r))) — preserves SPD for CG
+            auto bj = makeBJ();
+            auto isai = makeISAI();
+            std::vector<std::shared_ptr<const gko::LinOp>> ops =
+                {bj, isai, bj};
+            auto composed = gko::share(
+                gko::Composition<ValueType>::create(
+                    ops.begin(), ops.end()
+                )
+            );
+
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_generated_preconditioner(composed)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else if
+        (
+            preconditionerType_ == PreconditionerType::BJ_ISAI_ADDITIVE
+        )
+        {
+            // Additive: z = BJ(r) + ISAI(r) — SPD preserved
+            auto bj = makeBJ();
+            auto isai = makeISAI();
+            auto additive = gko::share(
+                AdditiveLinOp<ValueType>::create(bj, isai)
+            );
+
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_generated_preconditioner(additive)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else if
+        (
+            preconditionerType_ == PreconditionerType::BJ_ISAI_GMRES
+        )
+        {
+            // Multiplicative with GMRES (no SPD requirement)
+            auto bj = makeBJ();
+            auto isai = makeISAI();
+            std::vector<std::shared_ptr<const gko::LinOp>> ops =
+                {isai, bj};
+            auto composed = gko::share(
+                gko::Composition<ValueType>::create(
+                    ops.begin(), ops.end()
+                )
+            );
+
+            solver = gko::solver::Gmres<ValueType>::build()
+                .with_krylov_dim(100u)
+                .with_generated_preconditioner(composed)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else if
+        (
+            preconditionerType_ == PreconditionerType::BJ_ISAI_INNER_OUTER
+        )
+        {
+            // Inner CG-BJ as preconditioner for outer FGMRES
+            auto bjFactory = gko::share(
+                gko::preconditioner::Jacobi<ValueType, int>::build()
+                    .with_max_block_size(
+                        static_cast<unsigned>(blockSize_)
+                    )
+                    .on(exec)
+            );
+
+            auto innerCrit = gko::share(
+                gko::stop::Iteration::build()
+                    .with_max_iters(static_cast<gko::size_type>(5))
+                    .on(exec)
+            );
+
+            auto innerSolver = gko::share(
+                gko::solver::Cg<ValueType>::build()
+                    .with_preconditioner(bjFactory)
+                    .with_criteria(innerCrit)
+                    .on(exec)
+            );
+
+            solver = gko::solver::Gmres<ValueType>::build()
+                .with_krylov_dim(100u)
+                .with_flexible(true)
+                .with_preconditioner(innerSolver)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
+        else
+        {
+            // Factory-based preconditioner path
+            std::shared_ptr<gko::LinOpFactory> precond;
+
+            switch (preconditionerType_)
+            {
+                case PreconditionerType::BLOCK_JACOBI:
+                    precond = gko::share(
+                        gko::preconditioner::Jacobi<ValueType, int>::build()
+                            .with_max_block_size(
+                                static_cast<unsigned>(blockSize_)
+                            )
+                            .on(exec)
+                    );
+                    break;
+
+                case PreconditionerType::ISAI:
+                    precond = gko::share(
+                        gko::preconditioner::SpdIsai<ValueType, int>::build()
+                            .with_sparsity_power(isaiSparsityPower_)
+                            .on(exec)
+                    );
+                    break;
+
+                case PreconditionerType::JACOBI:
+                default:
+                    precond = gko::share(
+                        gko::preconditioner::Jacobi<ValueType, int>::build()
+                            .with_max_block_size(1u)
+                            .on(exec)
+                    );
+                    break;
+            }
+
+            // Generate solver from the local CSR matrix.  Preconditioners
+            // (Jacobi, Block Jacobi, ISAI) need matrix data which CSR
+            // supports but the matrix-free FoamGinkgoLinOp does not.
+            // The outer iterative refinement loop handles interface
+            // contributions in FP64.
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_preconditioner(precond)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+        }
     }
     catch (const std::exception& e)
     {
@@ -117,7 +284,7 @@ Foam::label Foam::OGL::OGLPCGSolver::solveImpl
     scalarField& psi,
     const scalarField& source,
     std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
-    std::shared_ptr<gko::solver::Cg<ValueType>>& solver,
+    std::shared_ptr<gko::LinOp>& solver,
     ValueType tolerance
 ) const
 {
@@ -317,6 +484,22 @@ Foam::OGL::OGLPCGSolver::OGLPCGSolver
             << "  precisionPolicy: "
             << (precisionPolicy_ == PrecisionPolicy::FP64 ? "FP64" :
                 precisionPolicy_ == PrecisionPolicy::FP32 ? "FP32" : "MIXED")
+            << nl
+            << "  preconditioner: "
+            << [&]() -> const char* {
+                switch (preconditionerType_)
+                {
+                    case PreconditionerType::JACOBI: return "Jacobi";
+                    case PreconditionerType::BLOCK_JACOBI: return "blockJacobi";
+                    case PreconditionerType::ISAI: return "ISAI";
+                    case PreconditionerType::BLOCK_JACOBI_ISAI: return "blockJacobiISAI";
+                    case PreconditionerType::BJ_ISAI_SANDWICH: return "bjIsaiSandwich";
+                    case PreconditionerType::BJ_ISAI_ADDITIVE: return "bjIsaiAdditive";
+                    case PreconditionerType::BJ_ISAI_GMRES: return "bjIsaiGmres";
+                    case PreconditionerType::BJ_ISAI_INNER_OUTER: return "bjIsaiInnerOuter";
+                    default: return "unknown";
+                }
+            }()
             << nl
             << "  iterativeRefinement: " << iterativeRefinement_ << nl
             << "  maxRefineIters: " << maxRefineIters_ << nl
