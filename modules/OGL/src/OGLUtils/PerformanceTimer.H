@@ -37,6 +37,7 @@ Description
     - T_copyFromDevice: GPU to host transfer
     - T_solveKernel: Ginkgo solver kernel time
     - T_totalSolve: End-to-end solve time
+    - GPU memory: Tracked allocation/peak/total via OGLExecutor
 
 SourceFiles
     PerformanceTimer.C
@@ -83,7 +84,8 @@ public:
         COPY_FROM_DEVICE,
         SOLVE_KERNEL,
         TOTAL_SOLVE,
-        REFINEMENT_RESIDUAL
+        REFINEMENT_RESIDUAL,
+        GPU_MEMORY
     };
 
 

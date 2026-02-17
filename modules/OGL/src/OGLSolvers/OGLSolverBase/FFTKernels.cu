@@ -22,20 +22,36 @@ License
     along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
 
 Description
-    CUDA implementation of FFT-based Laplacian preconditioner.
+    CUDA implementation of DCT-based Laplacian preconditioner for Neumann BCs.
 
-    Uses cuFFT R2C/C2R transforms for O(N log N) approximate inverse
-    of the discrete Laplacian on uniform Cartesian grids.
+    Uses even extension + cuFFT to implement DCT-II diagonalization of the
+    cell-centered FV Laplacian with Neumann (zeroGradient) boundary conditions.
 
-    Mathematical basis (periodic discrete Laplacian eigenvalues):
-        lambda(i,j,k) = 2/dx^2 * (cos(2*pi*i/nx) - 1)
-                       + 2/dy^2 * (cos(2*pi*j/ny) - 1)
-                       + 2/dz^2 * (cos(2*pi*k/nz) - 1)
+    For Neumann BCs on cell-centered unknowns, the eigenvectors are cosines
+    (DCT-II basis), NOT complex exponentials (DFT basis). Using DFT for a
+    Neumann problem applies the inverse in the wrong eigenbasis.
 
-    Preconditioner application:
-        x = IFFT( FFT(b) ./ lambda ) * (1/N)
+    Implementation: even-extend the input in each direction (N -> 2N),
+    apply FFT on the extended grid, scale by Neumann eigenvalues, IFFT,
+    extract the original block. This emulates DCT using cuFFT.
 
-    Reference: moljax paper, Section 3.4 (FFT-Diagonalized Operators)
+    Neumann eigenvalues (cell-centered FV):
+        lambda(i,j,k) = -2*coeffX*(1 - cos(pi*i/nx))
+                       - 2*coeffY*(1 - cos(pi*j/ny))
+                       - 2*coeffZ*(1 - cos(pi*k/nz))
+
+    Note: pi*k/N (Neumann/DCT) vs 2*pi*k/N (periodic/DFT).
+
+    Memory layout:
+        OpenFOAM: cellId = ix + iy*nx + iz*nx*ny (ix fastest)
+        Extended grid: 2nz * 2ny * 2nx (or nz if nz==1)
+        cuFFT: n = {ez, ey, ex} where ex = 2*nx, etc.
+
+    Status: Eigenmode self-test passes (100% match), but the preconditioner
+    does not yet improve CG convergence on real pressure systems. The likely
+    cause is mismatch between the idealized Neumann Laplacian and the actual
+    FV pressure operator (variable rAU, boundary stencils). Parked for now;
+    Block Jacobi is used as the production preconditioner.
 
 \*---------------------------------------------------------------------------*/
 
@@ -55,26 +71,27 @@ struct FFTPrecondState
 {
     int nx, ny, nz;
     int totalCells;          // nx * ny * nz
-    int complexSize;         // nx * ny * (nz/2 + 1)
+
+    // Extended dimensions (2*nx, 2*ny, 2*nz; nz stays 1 if nz==1)
+    int ex, ey, ez;
+    int extendedCells;       // ex * ey * ez
+    int complexSize;         // ez * ey * (ex/2 + 1)
+
     int useFloat;
 
-    // cuFFT plans
-    cufftHandle planR2C_f;   // float:  R2C forward
-    cufftHandle planC2R_f;   // float:  C2R inverse
-    cufftHandle planD2Z;     // double: D2Z forward
-    cufftHandle planZ2D;     // double: Z2D inverse
+    // cuFFT plans for the EXTENDED grid
+    cufftHandle planR2C_f;
+    cufftHandle planC2R_f;
+    cufftHandle planD2Z;
+    cufftHandle planZ2D;
 
-    // Inverse eigenvalues on GPU (1/lambda, with zero mode set to 0)
+    // Inverse eigenvalues (Neumann/DCT) on GPU, size complexSize
     float*  invEigFloat;
     double* invEigDouble;
 
-    // Work buffers on GPU
-    // For float:  cufftComplex (float2)  of size complexSize
-    // For double: cufftDoubleComplex (double2) of size complexSize
-    void* complexBuf;
-
-    // Padded real buffer for R2C (needs nx * ny * 2*(nz/2+1) reals)
-    void* paddedRealBuf;
+    // Work buffers for the extended grid
+    void* complexBuf;        // size complexSize * sizeof(complex)
+    void* realBuf;           // size extendedCells * sizeof(real)
 };
 
 
@@ -82,57 +99,112 @@ struct FFTPrecondState
 // CUDA kernels
 // -------------------------------------------------------------------------
 
-// Compute inverse eigenvalues for periodic Laplacian (float)
-__global__ void computeInvEigenvaluesF(
-    float* invEig,
-    int nx, int ny, int nzHalf,  // nzHalf = nz/2 + 1
-    int nz,
-    float dx, float dy, float dz
+// Even-extend a 3D array: [nz][ny][nx] -> [ez][ey][ex]
+// Half-sample symmetric (HSS) extension for DCT-II:
+//   ext[i] = orig[i]         for i < N
+//   ext[2N-1-i] = orig[i]   for i < N
+template<typename T>
+__global__ void evenExtend3D(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    int nx, int ny, int nz,
+    int ex, int ey, int ez
 )
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = nx * ny * nzHalf;
+    int extTotal = ex * ey * ez;
+    if (idx >= extTotal) return;
+
+    // Decompose extended index
+    int eix = idx % ex;
+    int eiy = (idx / ex) % ey;
+    int eiz = idx / (ex * ey);
+
+    // Map extended coordinate to original via reflection
+    int oix = (eix < nx) ? eix : (2 * nx - 1 - eix);
+    int oiy = (eiy < ny) ? eiy : (2 * ny - 1 - eiy);
+    int oiz;
+    if (nz == 1)
+        oiz = 0;  // No extension in z for 2D
+    else
+        oiz = (eiz < nz) ? eiz : (2 * nz - 1 - eiz);
+
+    output[idx] = input[oiz * nx * ny + oiy * nx + oix];
+}
+
+// Extract the original block from extended IFFT output
+template<typename T>
+__global__ void extractOriginal3D(
+    const T* __restrict__ extended,
+    T* __restrict__ output,
+    int nx, int ny, int nz,
+    int ex, int ey
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = nx * ny * nz;
     if (idx >= total) return;
 
-    // Decompose to frequency indices (cuFFT R2C output layout)
-    // Data layout: [ix][iy][iz] with iz varying fastest, size nzHalf
-    int iz = idx % nzHalf;
-    int iy = (idx / nzHalf) % ny;
-    int ix = idx / (nzHalf * ny);
+    int oix = idx % nx;
+    int oiy = (idx / nx) % ny;
+    int oiz = idx / (nx * ny);
 
-    float pi2 = 6.283185307179586f;  // 2*pi
+    output[idx] = extended[oiz * ex * ey + oiy * ex + oix];
+}
 
-    float lamX = 2.0f / (dx * dx) * (cosf(pi2 * (float)ix / (float)nx) - 1.0f);
-    float lamY = 2.0f / (dy * dy) * (cosf(pi2 * (float)iy / (float)ny) - 1.0f);
-    float lamZ = 2.0f / (dz * dz) * (cosf(pi2 * (float)iz / (float)nz) - 1.0f);
+// Compute inverse DCT/Neumann eigenvalues (float)
+// These use 2*pi*k/(2N) = pi*k/N because the even extension
+// maps DFT frequencies on [0, 2N) to DCT-II frequencies on [0, N).
+__global__ void computeInvEigenvaluesF(
+    float* invEig,
+    int nx, int ny, int nz,
+    int ex, int ey, int ez, int exHalf,
+    float coeffX, float coeffY, float coeffZ
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = ez * ey * exHalf;
+    if (idx >= total) return;
+
+    int kx = idx % exHalf;
+    int ky = (idx / exHalf) % ey;
+    int kz = idx / (exHalf * ey);
+
+    // Extended grid eigenvalues: 2*pi*k/(2N) = pi*k/N
+    float pi2 = 6.283185307179586f;
+    float lamX = -2.0f * coeffX * (1.0f - cosf(pi2 * (float)kx / (float)ex));
+    float lamY = -2.0f * coeffY * (1.0f - cosf(pi2 * (float)ky / (float)ey));
+    float lamZ = (nz > 1)
+        ? (-2.0f * coeffZ * (1.0f - cosf(pi2 * (float)kz / (float)ez)))
+        : 0.0f;
 
     float lam = lamX + lamY + lamZ;
 
-    // Inverse eigenvalue; zero mode (lam=0) maps to 0 (projects out constant)
     invEig[idx] = (fabsf(lam) > 1.0e-12f) ? (1.0f / lam) : 0.0f;
 }
 
-// Compute inverse eigenvalues for periodic Laplacian (double)
+// Compute inverse DCT/Neumann eigenvalues (double)
 __global__ void computeInvEigenvaluesD(
     double* invEig,
-    int nx, int ny, int nzHalf,
-    int nz,
-    double dx, double dy, double dz
+    int nx, int ny, int nz,
+    int ex, int ey, int ez, int exHalf,
+    double coeffX, double coeffY, double coeffZ
 )
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = nx * ny * nzHalf;
+    int total = ez * ey * exHalf;
     if (idx >= total) return;
 
-    int iz = idx % nzHalf;
-    int iy = (idx / nzHalf) % ny;
-    int ix = idx / (nzHalf * ny);
+    int kx = idx % exHalf;
+    int ky = (idx / exHalf) % ey;
+    int kz = idx / (exHalf * ey);
 
     double pi2 = 6.283185307179586;
-
-    double lamX = 2.0 / (dx * dx) * (cos(pi2 * (double)ix / (double)nx) - 1.0);
-    double lamY = 2.0 / (dy * dy) * (cos(pi2 * (double)iy / (double)ny) - 1.0);
-    double lamZ = 2.0 / (dz * dz) * (cos(pi2 * (double)iz / (double)nz) - 1.0);
+    double lamX = -2.0 * coeffX * (1.0 - cos(pi2 * (double)kx / (double)ex));
+    double lamY = -2.0 * coeffY * (1.0 - cos(pi2 * (double)ky / (double)ey));
+    double lamZ = (nz > 1)
+        ? (-2.0 * coeffZ * (1.0 - cos(pi2 * (double)kz / (double)ez)))
+        : 0.0;
 
     double lam = lamX + lamY + lamZ;
 
@@ -167,7 +239,7 @@ __global__ void scaleComplexD(
     data[idx].y *= invEig[idx];
 }
 
-// Scale real array by 1/N for cuFFT normalization (float)
+// Scale real array (float)
 __global__ void scaleRealF(float* data, float scale, int n)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,81 +247,12 @@ __global__ void scaleRealF(float* data, float scale, int n)
     data[idx] *= scale;
 }
 
-// Scale real array by 1/N for cuFFT normalization (double)
+// Scale real array (double)
 __global__ void scaleRealD(double* data, double scale, int n)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     data[idx] *= scale;
-}
-
-// Copy with padding for R2C (float): from (nx*ny*nz) to (nx*ny*2*(nz/2+1))
-// cuFFT R2C in-place requires the real array to be padded in the last dim
-__global__ void copyToPaddedF(
-    float* padded,
-    const float* src,
-    int nx, int ny, int nz, int nzPadded  // nzPadded = 2*(nz/2+1)
-)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nx * ny * nz) return;
-
-    int iz = idx % nz;
-    int iy = (idx / nz) % ny;
-    int ix = idx / (nz * ny);
-
-    padded[ix * ny * nzPadded + iy * nzPadded + iz] = src[idx];
-}
-
-// Copy from padded back to compact (float)
-__global__ void copyFromPaddedF(
-    float* dst,
-    const float* padded,
-    int nx, int ny, int nz, int nzPadded
-)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nx * ny * nz) return;
-
-    int iz = idx % nz;
-    int iy = (idx / nz) % ny;
-    int ix = idx / (nz * ny);
-
-    dst[idx] = padded[ix * ny * nzPadded + iy * nzPadded + iz];
-}
-
-// Copy with padding for R2C (double)
-__global__ void copyToPaddedD(
-    double* padded,
-    const double* src,
-    int nx, int ny, int nz, int nzPadded
-)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nx * ny * nz) return;
-
-    int iz = idx % nz;
-    int iy = (idx / nz) % ny;
-    int ix = idx / (nz * ny);
-
-    padded[ix * ny * nzPadded + iy * nzPadded + iz] = src[idx];
-}
-
-// Copy from padded back to compact (double)
-__global__ void copyFromPaddedD(
-    double* dst,
-    const double* padded,
-    int nx, int ny, int nz, int nzPadded
-)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= nx * ny * nz) return;
-
-    int iz = idx % nz;
-    int iy = (idx / nz) % ny;
-    int ix = idx / (nz * ny);
-
-    dst[idx] = padded[ix * ny * nzPadded + iy * nzPadded + iz];
 }
 
 
@@ -269,44 +272,44 @@ FFTPrecondHandle fftPrecondCreate(
     s->ny = ny;
     s->nz = nz;
     s->totalCells = nx * ny * nz;
-    s->complexSize = nx * ny * (nz / 2 + 1);
+
+    // Even extension dimensions: double each active dimension
+    s->ex = 2 * nx;
+    s->ey = 2 * ny;
+    s->ez = (nz > 1) ? (2 * nz) : 1;  // Don't extend z for 2D (nz=1)
+    s->extendedCells = s->ex * s->ey * s->ez;
+
+    // R2C halves the last (fastest) dimension
+    int exHalf = s->ex / 2 + 1;  // = nx + 1
+    s->complexSize = s->ez * s->ey * exHalf;
+
     s->useFloat = useFloat;
     s->invEigFloat = nullptr;
     s->invEigDouble = nullptr;
     s->complexBuf = nullptr;
-    s->paddedRealBuf = nullptr;
+    s->realBuf = nullptr;
     s->planR2C_f = 0;
     s->planC2R_f = 0;
     s->planD2Z = 0;
     s->planZ2D = 0;
 
-    int nzHalf = nz / 2 + 1;
-    int nzPadded = 2 * nzHalf;
-    int paddedSize = nx * ny * nzPadded;
-
-    // cuFFT dimensions: transform of size (nx, ny, nz)
-    // Data layout: ix varies slowest, iz varies fastest
-    // This matches OpenFOAM's blockMesh cell ordering for a single block:
-    //   cellId = ix + iy*nx + iz*nx*ny  (ix fastest)
-    // BUT cuFFT expects last dim to vary fastest.
-    //
-    // OpenFOAM ordering: ix fastest → data[iz][iy][ix]
-    // cuFFT 3D(n0,n1,n2): n2 fastest → we pass n = {nz, ny, nx}
-    // so that cuFFT treats ix (the fastest-varying in memory) as the
-    // last transform dimension.
-    int n[3] = {nz, ny, nx};
+    // cuFFT dimensions for the extended grid
+    int n[3] = {s->ez, s->ey, s->ex};
 
     int threads = 256;
 
+    fprintf(stderr, "FFTPrecond DCT: nx=%d ny=%d nz=%d -> extended %dx%dx%d"
+            " (complexSize=%d)\n",
+            nx, ny, nz, s->ex, s->ey, s->ez, s->complexSize);
+
     if (useFloat)
     {
-        // Create cuFFT plans
-        // For out-of-place R2C: input is padded real, output is complex
         cufftResult res;
+
         res = cufftPlanMany(
             &s->planR2C_f, 3, n,
-            nullptr, 1, 0,  // inembed, istride, idist (auto)
-            nullptr, 1, 0,  // onembed, ostride, odist (auto)
+            nullptr, 1, 0,
+            nullptr, 1, 0,
             CUFFT_R2C, 1
         );
         if (res != CUFFT_SUCCESS)
@@ -330,16 +333,20 @@ FFTPrecondHandle fftPrecondCreate(
             return nullptr;
         }
 
-        // Allocate GPU buffers
+        // Allocate GPU buffers for extended grid
         cudaMalloc(&s->invEigFloat, s->complexSize * sizeof(float));
         cudaMalloc(&s->complexBuf, s->complexSize * sizeof(cufftComplex));
-        cudaMalloc(&s->paddedRealBuf, paddedSize * sizeof(float));
+        cudaMalloc(&s->realBuf, s->extendedCells * sizeof(float));
 
-        // Compute inverse eigenvalues
+        // Compute initial eigenvalues using geometric coefficients
+        float geoCoeffX = (float)(dy * dz / dx);
+        float geoCoeffY = (float)(dx * dz / dy);
+        float geoCoeffZ = (float)(dx * dy / dz);
         int blocks = (s->complexSize + threads - 1) / threads;
         computeInvEigenvaluesF<<<blocks, threads>>>(
-            s->invEigFloat, nx, ny, nzHalf, nz,
-            (float)dx, (float)dy, (float)dz
+            s->invEigFloat, nx, ny, nz,
+            s->ex, s->ey, s->ez, exHalf,
+            geoCoeffX, geoCoeffY, geoCoeffZ
         );
         cudaDeviceSynchronize();
     }
@@ -376,12 +383,16 @@ FFTPrecondHandle fftPrecondCreate(
         cudaMalloc(&s->invEigDouble, s->complexSize * sizeof(double));
         cudaMalloc(&s->complexBuf,
             s->complexSize * sizeof(cufftDoubleComplex));
-        cudaMalloc(&s->paddedRealBuf, paddedSize * sizeof(double));
+        cudaMalloc(&s->realBuf, s->extendedCells * sizeof(double));
 
+        double geoCoeffX = dy * dz / dx;
+        double geoCoeffY = dx * dz / dy;
+        double geoCoeffZ = dx * dy / dz;
         int blocks = (s->complexSize + threads - 1) / threads;
         computeInvEigenvaluesD<<<blocks, threads>>>(
-            s->invEigDouble, nx, ny, nzHalf, nz,
-            dx, dy, dz
+            s->invEigDouble, nx, ny, nz,
+            s->ex, s->ey, s->ez, s->ex / 2 + 1,
+            geoCoeffX, geoCoeffY, geoCoeffZ
         );
         cudaDeviceSynchronize();
     }
@@ -409,9 +420,44 @@ void fftPrecondDestroy(FFTPrecondHandle h)
     }
 
     if (h->complexBuf) cudaFree(h->complexBuf);
-    if (h->paddedRealBuf) cudaFree(h->paddedRealBuf);
+    if (h->realBuf) cudaFree(h->realBuf);
 
     delete h;
+}
+
+
+extern "C"
+void fftPrecondUpdateCoeffs(
+    FFTPrecondHandle h,
+    double coeffX, double coeffY, double coeffZ
+)
+{
+    if (!h) return;
+
+    int exHalf = h->ex / 2 + 1;
+    int threads = 256;
+    int blocks = (h->complexSize + threads - 1) / threads;
+
+    fprintf(stderr, "FFTPrecond DCT: updating coeffs: coeffX=%.6e"
+            " coeffY=%.6e coeffZ=%.6e\n", coeffX, coeffY, coeffZ);
+
+    if (h->useFloat)
+    {
+        computeInvEigenvaluesF<<<blocks, threads>>>(
+            h->invEigFloat, h->nx, h->ny, h->nz,
+            h->ex, h->ey, h->ez, exHalf,
+            (float)coeffX, (float)coeffY, (float)coeffZ
+        );
+    }
+    else
+    {
+        computeInvEigenvaluesD<<<blocks, threads>>>(
+            h->invEigDouble, h->nx, h->ny, h->nz,
+            h->ex, h->ey, h->ez, exHalf,
+            coeffX, coeffY, coeffZ
+        );
+    }
+    cudaDeviceSynchronize();
 }
 
 
@@ -426,35 +472,37 @@ void fftPrecondApplyFloat(
     if (!h || n != h->totalCells) return;
 
     int threads = 256;
-    int nx = h->nx, ny = h->ny, nz = h->nz;
-    int nzHalf = nz / 2 + 1;
-    int nzPadded = 2 * nzHalf;
-
-    float* padded = (float*)h->paddedRealBuf;
+    float* ext = (float*)h->realBuf;
     cufftComplex* freq = (cufftComplex*)h->complexBuf;
 
-    // Zero the padded buffer (handles padding bytes)
-    cudaMemset(padded, 0, nx * ny * nzPadded * sizeof(float));
+    // 1. Even-extend input: [nz][ny][nx] -> [ez][ey][ex]
+    int extBlocks = (h->extendedCells + threads - 1) / threads;
+    evenExtend3D<float><<<extBlocks, threads>>>(
+        b_ptr, ext,
+        h->nx, h->ny, h->nz,
+        h->ex, h->ey, h->ez
+    );
 
-    // 1. Copy input to padded buffer
-    int blocks = (n + threads - 1) / threads;
-    copyToPaddedF<<<blocks, threads>>>(padded, b_ptr, nx, ny, nz, nzPadded);
+    // 2. Forward R2C FFT on extended grid
+    cufftExecR2C(h->planR2C_f, ext, freq);
 
-    // 2. Forward R2C FFT (in-place on padded buffer → complex output)
-    cufftExecR2C(h->planR2C_f, padded, freq);
-
-    // 3. Scale by inverse eigenvalues
+    // 3. Scale by inverse Neumann eigenvalues
     int cblocks = (h->complexSize + threads - 1) / threads;
     scaleComplexF<<<cblocks, threads>>>(freq, h->invEigFloat, h->complexSize);
 
-    // 4. Inverse C2R FFT
-    cufftExecC2R(h->planC2R_f, freq, padded);
+    // 4. Inverse C2R FFT -> extended real buffer
+    cufftExecC2R(h->planC2R_f, freq, ext);
 
-    // 5. Copy from padded to output with 1/N normalization
-    copyFromPaddedF<<<blocks, threads>>>(x_ptr, padded, nx, ny, nz, nzPadded);
+    // 5. Extract original block and normalize by 1/extendedCells
+    int origBlocks = (n + threads - 1) / threads;
+    extractOriginal3D<float><<<origBlocks, threads>>>(
+        ext, x_ptr,
+        h->nx, h->ny, h->nz,
+        h->ex, h->ey
+    );
 
-    float scale = 1.0f / (float)n;
-    scaleRealF<<<blocks, threads>>>(x_ptr, scale, n);
+    float scale = 1.0f / (float)h->extendedCells;
+    scaleRealF<<<origBlocks, threads>>>(x_ptr, scale, n);
 }
 
 
@@ -469,27 +517,35 @@ void fftPrecondApplyDouble(
     if (!h || n != h->totalCells) return;
 
     int threads = 256;
-    int nx = h->nx, ny = h->ny, nz = h->nz;
-    int nzHalf = nz / 2 + 1;
-    int nzPadded = 2 * nzHalf;
-
-    double* padded = (double*)h->paddedRealBuf;
+    double* ext = (double*)h->realBuf;
     cufftDoubleComplex* freq = (cufftDoubleComplex*)h->complexBuf;
 
-    cudaMemset(padded, 0, nx * ny * nzPadded * sizeof(double));
+    // 1. Even-extend input
+    int extBlocks = (h->extendedCells + threads - 1) / threads;
+    evenExtend3D<double><<<extBlocks, threads>>>(
+        b_ptr, ext,
+        h->nx, h->ny, h->nz,
+        h->ex, h->ey, h->ez
+    );
 
-    int blocks = (n + threads - 1) / threads;
-    copyToPaddedD<<<blocks, threads>>>(padded, b_ptr, nx, ny, nz, nzPadded);
+    // 2. Forward D2Z FFT on extended grid
+    cufftExecD2Z(h->planD2Z, ext, freq);
 
-    cufftExecD2Z(h->planD2Z, padded, freq);
-
+    // 3. Scale by inverse Neumann eigenvalues
     int cblocks = (h->complexSize + threads - 1) / threads;
     scaleComplexD<<<cblocks, threads>>>(freq, h->invEigDouble, h->complexSize);
 
-    cufftExecZ2D(h->planZ2D, freq, padded);
+    // 4. Inverse Z2D FFT
+    cufftExecZ2D(h->planZ2D, freq, ext);
 
-    copyFromPaddedD<<<blocks, threads>>>(x_ptr, padded, nx, ny, nz, nzPadded);
+    // 5. Extract original block and normalize
+    int origBlocks = (n + threads - 1) / threads;
+    extractOriginal3D<double><<<origBlocks, threads>>>(
+        ext, x_ptr,
+        h->nx, h->ny, h->nz,
+        h->ex, h->ey
+    );
 
-    double scale = 1.0 / (double)n;
-    scaleRealD<<<blocks, threads>>>(x_ptr, scale, n);
+    double scale = 1.0 / (double)h->extendedCells;
+    scaleRealD<<<origBlocks, threads>>>(x_ptr, scale, n);
 }

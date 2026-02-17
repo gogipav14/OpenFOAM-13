@@ -25,6 +25,7 @@ License
 
 #include "OGLExecutor.H"
 #include "GinkgoMemoryPool.H"
+#include "HaloKernels.h"
 #include "messageStream.H"
 #include "Pstream.H"
 
@@ -223,9 +224,28 @@ Foam::OGL::OGLExecutor::OGLExecutor(const dictionary& dict)
     debug_(dict.lookupOrDefault<label>("debug", 0)),
     config_(dict),
     memoryPool_(nullptr),
-    memoryPoolEnabled_(false)
+    memoryPoolEnabled_(false),
+    memoryUsed_(0),
+    peakMemoryUsed_(0),
+    gpuMemoryTotal_(0)
 {
     initializeExecutors();
+
+    // Query total GPU memory
+    if (gpuAvailable_)
+    {
+        size_t gpuFree = 0;
+        size_t gpuTotal = 0;
+        haloGetGpuMemInfo(&gpuFree, &gpuTotal);
+        gpuMemoryTotal_ = gpuTotal;
+
+        if (debug_ > 0)
+        {
+            Info<< "OGLExecutor: GPU memory "
+                << gpuTotal / (1024*1024) << " MB total, "
+                << gpuFree / (1024*1024) << " MB free" << endl;
+        }
+    }
 
     // Initialize memory pool if enabled
     memoryPoolEnabled_ = dict.lookupOrDefault<bool>("enableMemoryPool", true);
@@ -282,7 +302,12 @@ Foam::OGL::OGLExecutor::~OGLExecutor()
         Warning << "OGLExecutor: Error during shutdown: " << e.what() << endl;
     }
 
-    // Report memory pool statistics before cleanup
+    // Report memory statistics before cleanup
+    if (debug_ > 0)
+    {
+        reportMemory();
+    }
+
     if (memoryPool_ && debug_ > 0)
     {
         memoryPool_->report();
@@ -387,6 +412,78 @@ void Foam::OGL::OGLExecutor::checkGinkgoError
     FatalErrorInFunction
         << "Ginkgo operation '" << operation << "' failed: " << e.what()
         << abort(FatalError);
+}
+
+
+// * * * * * * * * * * * * Memory Tracking Functions  * * * * * * * * * * * * //
+
+void Foam::OGL::OGLExecutor::trackAllocation(size_t bytes) const
+{
+    size_t current = memoryUsed_.fetch_add(bytes) + bytes;
+
+    // Update peak (lock-free CAS loop)
+    size_t peak = peakMemoryUsed_.load();
+    while (current > peak)
+    {
+        if (peakMemoryUsed_.compare_exchange_weak(peak, current))
+        {
+            break;
+        }
+    }
+
+    // Warn at 80% GPU memory usage
+    if (gpuMemoryTotal_ > 0 && current > gpuMemoryTotal_ * 8 / 10)
+    {
+        WarningInFunction
+            << "GPU memory usage at "
+            << (current * 100 / gpuMemoryTotal_) << "% ("
+            << current / (1024*1024) << " / "
+            << gpuMemoryTotal_ / (1024*1024) << " MB)"
+            << endl;
+    }
+}
+
+
+void Foam::OGL::OGLExecutor::trackDeallocation(size_t bytes) const
+{
+    memoryUsed_.fetch_sub(bytes);
+}
+
+
+size_t Foam::OGL::OGLExecutor::memoryUsed() const
+{
+    return memoryUsed_.load();
+}
+
+
+size_t Foam::OGL::OGLExecutor::peakMemoryUsed() const
+{
+    return peakMemoryUsed_.load();
+}
+
+
+size_t Foam::OGL::OGLExecutor::gpuMemoryTotal() const
+{
+    return gpuMemoryTotal_;
+}
+
+
+void Foam::OGL::OGLExecutor::reportMemory() const
+{
+    const size_t used = memoryUsed_.load();
+    const size_t peak = peakMemoryUsed_.load();
+
+    Info<< "OGLExecutor GPU Memory:" << nl
+        << "  Current:  " << used / (1024*1024) << " MB" << nl
+        << "  Peak:     " << peak / (1024*1024) << " MB" << nl;
+
+    if (gpuMemoryTotal_ > 0)
+    {
+        Info<< "  Total:    " << gpuMemoryTotal_ / (1024*1024) << " MB" << nl
+            << "  Usage:    " << (peak * 100 / gpuMemoryTotal_) << "%" << nl;
+    }
+
+    Info<< endl;
 }
 
 

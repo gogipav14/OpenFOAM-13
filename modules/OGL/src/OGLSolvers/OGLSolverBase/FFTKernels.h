@@ -67,6 +67,22 @@ FFTPrecondHandle fftPrecondCreate(
 void fftPrecondDestroy(FFTPrecondHandle h);
 
 /*
+ * Update eigenvalues with actual FV coupling coefficients.
+ *
+ * Use this to match the eigenvalues to the actual assembled matrix
+ * rather than the geometric Laplacian. For the pressure Poisson equation,
+ * the coefficients include the rAU (1/Ap) factor from momentum.
+ *
+ * coeffX, coeffY, coeffZ: mean off-diagonal coupling magnitudes in each
+ *   direction, extracted from the actual CSR matrix.
+ *   e.g. coeffX = mean(|A[i, i±1]|) for x-neighbors
+ */
+void fftPrecondUpdateCoeffs(
+    FFTPrecondHandle h,
+    double coeffX, double coeffY, double coeffZ
+);
+
+/*
  * Apply FFT preconditioner in single precision.
  *
  * Computes: x = L^{-1} * b  where L is the discrete Laplacian

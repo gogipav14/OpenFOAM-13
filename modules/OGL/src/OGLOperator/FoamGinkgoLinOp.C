@@ -61,15 +61,37 @@ void Foam::OGL::FoamGinkgoLinOp<ValueType>::updateMatrix() const
         // Check if we need to update values
         if (!valuesValid_)
         {
-            if constexpr (std::is_same<ValueType, float>::value)
+            if (localMatrix_)
             {
-                csrConverter_->updateValuesF32();
-                localMatrix_ = csrConverter_->createGinkgoMatrixF32(this->get_executor());
+                // GPU CSR exists — update values in-place (no structure copy)
+                if constexpr (std::is_same<ValueType, float>::value)
+                {
+                    csrConverter_->updateValuesInPlaceF32(localMatrix_);
+                }
+                else
+                {
+                    csrConverter_->updateValuesInPlaceF64(localMatrix_);
+                }
             }
             else
             {
-                csrConverter_->updateValues();
-                localMatrix_ = csrConverter_->createGinkgoMatrixF64(this->get_executor());
+                // First call — create full GPU CSR (copies structure + values)
+                if constexpr (std::is_same<ValueType, float>::value)
+                {
+                    csrConverter_->updateValuesF32();
+                    localMatrix_ =
+                        csrConverter_->createGinkgoMatrixF32(
+                            this->get_executor()
+                        );
+                }
+                else
+                {
+                    csrConverter_->updateValues();
+                    localMatrix_ =
+                        csrConverter_->createGinkgoMatrixF64(
+                            this->get_executor()
+                        );
+                }
             }
 
             valuesValid_ = cacheValues_;

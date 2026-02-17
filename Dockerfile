@@ -100,6 +100,19 @@ RUN nvcc -O3 -shared -Xcompiler -fPIC \
     -lcufft \
     && echo "FFT preconditioner CUDA kernels OK"
 
+# ---- Halo Exchange CUDA kernels ---------------------------------------------
+# GPU gather/scatter kernels for processor-boundary halo exchange.
+# No cuFFT dependency — pure CUDA kernels.
+RUN nvcc -O3 -shared -Xcompiler -fPIC \
+    -gencode arch=compute_75,code=sm_75 \
+    -gencode arch=compute_80,code=sm_80 \
+    -gencode arch=compute_86,code=sm_86 \
+    -gencode arch=compute_89,code=sm_89 \
+    -gencode arch=compute_120,code=sm_120 \
+    -o /opt/ginkgo/lib/libhalokernel.so \
+    /opt/OpenFOAM-13/modules/OGL/src/OGLOperator/HaloKernels.cu \
+    && echo "Halo exchange CUDA kernels OK"
+
 # ---- OGL (OpenFOAM Ginkgo Layer) ------------------------------------------
 ENV GINKGO_ROOT=/opt/ginkgo
 

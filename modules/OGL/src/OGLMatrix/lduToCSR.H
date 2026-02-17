@@ -183,6 +183,20 @@ public:
                 std::shared_ptr<const gko::Executor> exec
             ) const;
 
+            //- Update values of an existing GPU CSR matrix in-place
+            //  Only copies the values array (no structure copy).
+            //  The matrix must have been previously created with
+            //  createGinkgoMatrixF64/F32.
+            void updateValuesInPlaceF64
+            (
+                std::shared_ptr<CsrMatrixF64> existingMatrix
+            );
+
+            void updateValuesInPlaceF32
+            (
+                std::shared_ptr<CsrMatrixF32> existingMatrix
+            );
+
 
         // Access
 

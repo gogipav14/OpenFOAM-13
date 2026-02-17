@@ -61,8 +61,12 @@ void Foam::OGL::OGLBatchedSolver::initBatch(label nCells) const
 
 Foam::label Foam::OGL::OGLBatchedSolver::executeBatchedSolve() const
 {
-    // TODO: Implement true batched solve using Ginkgo batched solvers
-    // For now, fall back to sequential
+    // Future: Implement true batched solve using Ginkgo's batch::solver API
+    // (gko::batch::matrix::Csr + gko::batch::solver::Bicgstab).
+    // This would solve all batch items (e.g. Ux, Uy, Uz) simultaneously,
+    // improving GPU utilization for small-per-component systems.
+    // The sequential fallback below is functionally correct but does not
+    // exploit cross-component parallelism.
     return executeSequentialSolve();
 }
 

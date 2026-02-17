@@ -162,6 +162,18 @@ protected:
     }
 
 
+public:
+
+    // Update eigenvalues with actual matrix coupling coefficients
+    void updateCoeffs(double coeffX, double coeffY, double coeffZ)
+    {
+        if (handle_)
+        {
+            fftPrecondUpdateCoeffs(handle_, coeffX, coeffY, coeffZ);
+        }
+    }
+
+
 private:
 
     FFTPrecondHandle handle_;

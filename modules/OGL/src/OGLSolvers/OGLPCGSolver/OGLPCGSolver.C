@@ -244,6 +244,91 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
                 )
             );
 
+            // Extract mean coupling coefficients from CSR matrix
+            // to update FFT eigenvalues with actual matrix values
+            {
+                auto csrMtx = gko::as<gko::matrix::Csr<ValueType, int>>(
+                    op->localMatrix()
+                );
+                auto nRows = csrMtx->get_size()[0];
+                auto rowPtrs = csrMtx->get_const_row_ptrs();
+                auto colIdxs = csrMtx->get_const_col_idxs();
+                auto vals = csrMtx->get_const_values();
+
+                std::vector<int> hRowPtrs(nRows + 1);
+                std::vector<int> hColIdxs(csrMtx->get_num_stored_elements());
+                std::vector<ValueType> hVals(csrMtx->get_num_stored_elements());
+
+                exec->get_master()->copy_from(
+                    exec.get(), nRows + 1, rowPtrs, hRowPtrs.data()
+                );
+                exec->get_master()->copy_from(
+                    exec.get(),
+                    csrMtx->get_num_stored_elements(),
+                    colIdxs, hColIdxs.data()
+                );
+                exec->get_master()->copy_from(
+                    exec.get(),
+                    csrMtx->get_num_stored_elements(),
+                    vals, hVals.data()
+                );
+
+                // For structured mesh: x-neighbors differ by ±1,
+                // y-neighbors by ±nx, z-neighbors by ±(nx*ny)
+                int nx = fftDimensions_.x();
+                int nxy = fftDimensions_.x() * fftDimensions_.y();
+
+                double sumCoeffX = 0, sumCoeffY = 0, sumCoeffZ = 0;
+                int countX = 0, countY = 0, countZ = 0;
+
+                for (gko::size_type row = 0; row < nRows; row++)
+                {
+                    for (int j = hRowPtrs[row]; j < hRowPtrs[row+1]; j++)
+                    {
+                        int col = hColIdxs[j];
+                        if (col == static_cast<int>(row)) continue;
+
+                        int diff = std::abs(col - static_cast<int>(row));
+                        double val = std::abs(static_cast<double>(hVals[j]));
+
+                        if (diff == 1)
+                        {
+                            sumCoeffX += val;
+                            countX++;
+                        }
+                        else if (diff == nx)
+                        {
+                            sumCoeffY += val;
+                            countY++;
+                        }
+                        else if (diff == nxy)
+                        {
+                            sumCoeffZ += val;
+                            countZ++;
+                        }
+                    }
+                }
+
+                double meanCoeffX = (countX > 0) ? sumCoeffX / countX : 0;
+                double meanCoeffY = (countY > 0) ? sumCoeffY / countY : 0;
+                double meanCoeffZ = (countZ > 0) ? sumCoeffZ / countZ : 0;
+
+                Info<< "FFT: extracted mean couplings from CSR:"
+                    << " coeffX=" << meanCoeffX
+                    << " (n=" << countX << ")"
+                    << " coeffY=" << meanCoeffY
+                    << " (n=" << countY << ")"
+                    << " coeffZ=" << meanCoeffZ
+                    << " (n=" << countZ << ")"
+                    << endl;
+
+                // Update FFT preconditioner eigenvalues with actual
+                // coefficients
+                fftPrecond->updateCoeffs(
+                    meanCoeffX, meanCoeffY, meanCoeffZ
+                );
+            }
+
             solver = gko::solver::Cg<ValueType>::build()
                 .with_generated_preconditioner(fftPrecond)
                 .with_criteria(iterCrit, resCrit)

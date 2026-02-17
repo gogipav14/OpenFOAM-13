@@ -24,6 +24,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include "PerformanceTimer.H"
+#include "OGLExecutor.H"
 #include "Pstream.H"
 #include "PstreamReduceOps.H"
 
@@ -41,7 +42,8 @@ Foam::OGL::PerformanceTimer::categoryNames_ =
     {Category::COPY_FROM_DEVICE, "copyFromDevice"},
     {Category::SOLVE_KERNEL, "solveKernel"},
     {Category::TOTAL_SOLVE, "totalSolve"},
-    {Category::REFINEMENT_RESIDUAL, "refinementResidual"}
+    {Category::REFINEMENT_RESIDUAL, "refinementResidual"},
+    {Category::GPU_MEMORY, "gpuMemory"}
 };
 
 
@@ -186,6 +188,22 @@ void Foam::OGL::PerformanceTimer::report(const word& fieldName) const
                 << t << " s (" << pct << "%), "
                 << n << " calls, "
                 << avg << " ms/call" << nl;
+        }
+    }
+
+    // GPU memory summary
+    if (OGLExecutor::initialized())
+    {
+        const OGLExecutor& exec = OGLExecutor::instance();
+        Info<< nl << "GPU Memory:" << nl
+            << "  Current:  " << exec.memoryUsed() / (1024*1024) << " MB" << nl
+            << "  Peak:     " << exec.peakMemoryUsed() / (1024*1024)
+            << " MB" << nl;
+
+        if (exec.gpuMemoryTotal() > 0)
+        {
+            Info<< "  Total:    "
+                << exec.gpuMemoryTotal() / (1024*1024) << " MB" << nl;
         }
     }
 

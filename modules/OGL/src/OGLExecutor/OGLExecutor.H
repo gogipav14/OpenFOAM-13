@@ -100,6 +100,11 @@ class OGLExecutor
         //- Whether memory pool is enabled
         bool memoryPoolEnabled_;
 
+        //- GPU memory tracking (atomic for thread safety)
+        mutable std::atomic<size_t> memoryUsed_;
+        mutable std::atomic<size_t> peakMemoryUsed_;
+        size_t gpuMemoryTotal_;
+
 
     // Private Static Data
 
@@ -211,6 +216,27 @@ public:
             {
                 return memoryPool_ != nullptr;
             }
+
+
+        // Memory tracking
+
+            //- Record a GPU allocation
+            void trackAllocation(size_t bytes) const;
+
+            //- Record a GPU deallocation
+            void trackDeallocation(size_t bytes) const;
+
+            //- Return current tracked GPU memory usage in bytes
+            size_t memoryUsed() const;
+
+            //- Return peak tracked GPU memory usage in bytes
+            size_t peakMemoryUsed() const;
+
+            //- Return total GPU memory in bytes (0 if not a GPU backend)
+            size_t gpuMemoryTotal() const;
+
+            //- Print GPU memory usage summary
+            void reportMemory() const;
 
 
         // Utility

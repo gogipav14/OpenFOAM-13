@@ -25,6 +25,8 @@ License
 
 #include "lduToCSR.H"
 #include "lduAddressing.H"
+#include "OGLExecutor.H"
+#include "HaloKernels.h"
 
 #include <algorithm>
 #include <numeric>
@@ -288,13 +290,25 @@ Foam::OGL::lduToCSR::createGinkgoMatrixF64
     );
     gko::array<double> vals(exec, valsView);
 
-    return CsrMatrixF64::create(
+    auto matrix = CsrMatrixF64::create(
         exec,
         gko::dim<2>(nRows_, nRows_),
         std::move(vals),
         std::move(colIdxs),
         std::move(rowPtrs)
     );
+
+    // Track GPU memory: rowPtrs(int) + colIdxs(int) + values(double)
+    if (OGLExecutor::initialized())
+    {
+        const size_t bytes =
+            (nRows_ + 1) * sizeof(int)
+          + nNonZeros_ * sizeof(int)
+          + nNonZeros_ * sizeof(double);
+        OGLExecutor::instance().trackAllocation(bytes);
+    }
+
+    return matrix;
 }
 
 
@@ -332,12 +346,58 @@ Foam::OGL::lduToCSR::createGinkgoMatrixF32
     );
     gko::array<float> vals(exec, valsView);
 
-    return CsrMatrixF32::create(
+    auto matrix = CsrMatrixF32::create(
         exec,
         gko::dim<2>(nRows_, nRows_),
         std::move(vals),
         std::move(colIdxs),
         std::move(rowPtrs)
+    );
+
+    // Track GPU memory: rowPtrs(int) + colIdxs(int) + values(float)
+    if (OGLExecutor::initialized())
+    {
+        const size_t bytes =
+            (nRows_ + 1) * sizeof(int)
+          + nNonZeros_ * sizeof(int)
+          + nNonZeros_ * sizeof(float);
+        OGLExecutor::instance().trackAllocation(bytes);
+    }
+
+    return matrix;
+}
+
+
+void Foam::OGL::lduToCSR::updateValuesInPlaceF64
+(
+    std::shared_ptr<CsrMatrixF64> existingMatrix
+)
+{
+    // Refresh host values via LDU-to-CSR mapping arrays
+    updateValues();
+
+    // Overwrite GPU values buffer directly — no new allocation, no structure copy
+    haloCopyHostToDevice
+    (
+        existingMatrix->get_values(),
+        valuesF64_.data(),
+        nNonZeros_ * sizeof(double)
+    );
+}
+
+
+void Foam::OGL::lduToCSR::updateValuesInPlaceF32
+(
+    std::shared_ptr<CsrMatrixF32> existingMatrix
+)
+{
+    updateValuesF32();
+
+    haloCopyHostToDevice
+    (
+        existingMatrix->get_values(),
+        valuesF32_.data(),
+        nNonZeros_ * sizeof(float)
     );
 }
 
