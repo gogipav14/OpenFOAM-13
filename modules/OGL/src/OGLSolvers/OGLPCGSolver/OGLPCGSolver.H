@@ -69,6 +69,8 @@ SourceFiles
 #include "FoamGinkgoLinOp.H"
 
 #include "GinkgoCompat.H"
+#include <map>
+#include <mutex>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -85,9 +87,31 @@ class OGLPCGSolver
 :
     public OGLSolverBase
 {
+    // Private Types
+
+        //- Cache entry for persisting GPU state across solver instantiations
+        struct SolverCache
+        {
+            std::shared_ptr<FoamGinkgoLinOp<float>> opF32;
+            std::shared_ptr<FoamGinkgoLinOp<double>> opF64;
+            std::shared_ptr<gko::LinOp> solverF32;
+            std::shared_ptr<gko::LinOp> solverF64;
+        };
+
+
+    // Private Static Data
+
+        //- Static cache: field name -> GPU state (persists across
+        //  OpenFOAM solver re-instantiations)
+        static std::map<word, SolverCache> cache_;
+
+        //- Mutex for cache access
+        static std::mutex cacheMutex_;
+
+
     // Private Data
 
-        //- Cached FP32 operator
+        //- Cached FP32 operator (references into static cache)
         mutable std::shared_ptr<FoamGinkgoLinOp<float>> operatorF32_;
 
         //- Cached FP64 operator

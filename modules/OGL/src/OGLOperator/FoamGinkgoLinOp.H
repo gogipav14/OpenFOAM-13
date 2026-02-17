@@ -237,6 +237,25 @@ public:
             valuesValid_ = false;
         }
 
+        //- Update matrix and interface pointers (for solver caching
+        //  across OpenFOAM re-instantiations where the same matrix
+        //  object is reused but the solver is recreated)
+        void updatePointers
+        (
+            const lduMatrix& matrix,
+            const FieldField<Field, scalar>& interfaceBouCoeffs,
+            const FieldField<Field, scalar>& interfaceIntCoeffs,
+            const lduInterfaceFieldPtrsList& interfaces,
+            const direction cmpt
+        )
+        {
+            matrix_ = &matrix;
+            interfaceBouCoeffs_ = &interfaceBouCoeffs;
+            interfaceIntCoeffs_ = &interfaceIntCoeffs;
+            interfaces_ = &interfaces;
+            cmpt_ = cmpt;
+        }
+
         //- Access the local CSR matrix
         std::shared_ptr<CsrMatrix> localMatrix() const
         {

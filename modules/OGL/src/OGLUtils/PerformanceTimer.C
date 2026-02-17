@@ -191,20 +191,11 @@ void Foam::OGL::PerformanceTimer::report(const word& fieldName) const
         }
     }
 
-    // GPU memory summary
+    // GPU memory summary (uses OGLExecutor::reportMemory() for formatting)
     if (OGLExecutor::initialized())
     {
         const OGLExecutor& exec = OGLExecutor::instance();
-        Info<< nl << "GPU Memory:" << nl
-            << "  Current:  " << exec.memoryUsed() / (1024*1024) << " MB" << nl
-            << "  Peak:     " << exec.peakMemoryUsed() / (1024*1024)
-            << " MB" << nl;
-
-        if (exec.gpuMemoryTotal() > 0)
-        {
-            Info<< "  Total:    "
-                << exec.gpuMemoryTotal() / (1024*1024) << " MB" << nl;
-        }
+        exec.reportMemory();
     }
 
     Info<< "=============================================" << nl << endl;

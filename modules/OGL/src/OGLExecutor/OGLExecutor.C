@@ -473,9 +473,25 @@ void Foam::OGL::OGLExecutor::reportMemory() const
     const size_t used = memoryUsed_.load();
     const size_t peak = peakMemoryUsed_.load();
 
+    // Use KB for small values, MB for larger
+    auto fmtSize = [&](size_t bytes)
+    {
+        if (bytes < 1024*1024)
+        {
+            Info<< bytes / 1024 << " KB";
+        }
+        else
+        {
+            Info<< bytes / (1024*1024) << " MB";
+        }
+    };
+
     Info<< "OGLExecutor GPU Memory:" << nl
-        << "  Current:  " << used / (1024*1024) << " MB" << nl
-        << "  Peak:     " << peak / (1024*1024) << " MB" << nl;
+        << "  Current:  ";
+    fmtSize(used);
+    Info<< nl << "  Peak:     ";
+    fmtSize(peak);
+    Info<< nl;
 
     if (gpuMemoryTotal_ > 0)
     {

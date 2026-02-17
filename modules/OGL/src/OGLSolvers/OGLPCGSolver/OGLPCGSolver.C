@@ -46,6 +46,11 @@ namespace OGL
 }
 }
 
+// Static cache members
+std::map<Foam::word, Foam::OGL::OGLPCGSolver::SolverCache>
+    Foam::OGL::OGLPCGSolver::cache_;
+std::mutex Foam::OGL::OGLPCGSolver::cacheMutex_;
+
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
@@ -61,19 +66,40 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
 
     try
     {
-        // Create the linear operator
-        op = std::make_shared<FoamGinkgoLinOp<ValueType>>
-        (
-            exec,
-            matrix_,
-            interfaceBouCoeffs_,
-            interfaceIntCoeffs_,
-            interfaces_,
-            0,  // cmpt
-            true,  // includeInterfaces
-            cacheStructure_,
-            cacheValues_
-        );
+        if (op)
+        {
+            // Reuse cached operator — update pointers and invalidate values
+            op->updatePointers
+            (
+                matrix_,
+                interfaceBouCoeffs_,
+                interfaceIntCoeffs_,
+                interfaces_,
+                0  // cmpt
+            );
+            op->invalidateValues();
+
+            if (debug_ >= 2)
+            {
+                Info<< "OGLPCGSolver: Reusing cached operator" << endl;
+            }
+        }
+        else
+        {
+            // First call — create operator from scratch
+            op = std::make_shared<FoamGinkgoLinOp<ValueType>>
+            (
+                exec,
+                matrix_,
+                interfaceBouCoeffs_,
+                interfaceIntCoeffs_,
+                interfaces_,
+                0,  // cmpt
+                true,  // includeInterfaces
+                cacheStructure_,
+                cacheValues_
+            );
+        }
 
         // Stopping criteria (shared by all preconditioner paths)
         auto iterCrit = gko::share(
@@ -441,10 +467,23 @@ Foam::label Foam::OGL::OGLPCGSolver::solveImpl
         {
             updateSolverImpl(op, solver, tolerance);
         }
-        else if (!cacheValues_)
+        else
         {
-            // Invalidate values to force update
-            op->invalidateValues();
+            // Solver exists (cached) — update matrix pointers and
+            // invalidate values so CSR values refresh in-place
+            op->updatePointers
+            (
+                matrix_,
+                interfaceBouCoeffs_,
+                interfaceIntCoeffs_,
+                interfaces_,
+                0  // cmpt
+            );
+
+            if (!cacheValues_)
+            {
+                op->invalidateValues();
+            }
         }
 
         // Convert to Ginkgo vectors using appropriate precision
@@ -573,7 +612,7 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP32
     const scalar tolerance
 ) const
 {
-    return solveImpl<float>
+    label iters = solveImpl<float>
     (
         psi,
         source,
@@ -581,6 +620,14 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP32
         solverF32_,
         static_cast<float>(innerTolerance_)
     );
+
+    // Persist operator to static cache for next instantiation
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        cache_[fieldName_].opF32 = operatorF32_;
+    }
+
+    return iters;
 }
 
 
@@ -591,7 +638,17 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP64
     const scalar tolerance
 ) const
 {
-    return solveImpl<double>(psi, source, operatorF64_, solverF64_, tolerance_);
+    label iters = solveImpl<double>(
+        psi, source, operatorF64_, solverF64_, tolerance_
+    );
+
+    // Persist operator to static cache for next instantiation
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        cache_[fieldName_].opF64 = operatorF64_;
+    }
+
+    return iters;
 }
 
 
@@ -621,6 +678,27 @@ Foam::OGL::OGLPCGSolver::OGLPCGSolver
     solverF32_(nullptr),
     solverF64_(nullptr)
 {
+    // Restore cached operator from previous instantiation (if any).
+    // Only the operator (with its GPU CSR matrix) is cached — NOT the
+    // Ginkgo solver, because the solver's preconditioner (Jacobi blocks)
+    // depends on the matrix values and must be regenerated each corrector.
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        auto it = cache_.find(fieldName);
+        if (it != cache_.end())
+        {
+            operatorF32_ = it->second.opF32;
+            operatorF64_ = it->second.opF64;
+            // solverF32_/solverF64_ left as nullptr — will be regenerated
+
+            if (debug_ >= 2)
+            {
+                Info<< "OGLPCGSolver: Restored cached operator for "
+                    << fieldName << endl;
+            }
+        }
+    }
+
     if (debug_ >= 1)
     {
         Info<< "OGLPCGSolver: Created for field " << fieldName << nl
