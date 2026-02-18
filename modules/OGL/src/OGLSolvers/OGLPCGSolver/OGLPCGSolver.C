@@ -110,6 +110,7 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
         auto resCrit = gko::share(
             gko::stop::ResidualNorm<ValueType>::build()
                 .with_reduction_factor(tolerance)
+                .with_baseline(gko::stop::mode::initial_resnorm)
                 .on(exec)
         );
 
@@ -599,7 +600,11 @@ void Foam::OGL::OGLPCGSolver::updateSolverF32() const
 
 void Foam::OGL::OGLPCGSolver::updateSolverF64() const
 {
-    updateSolverImpl<double>(operatorF64_, solverF64_, tolerance_);
+    // Fallback path: when called outside the main solve() flow,
+    // use relTol if available, otherwise tolerance_ as reduction factor.
+    // The main solve path passes the correct effective factor via solveFP64().
+    const double ginkgoTol = (relTol_ > 0) ? relTol_ : tolerance_;
+    updateSolverImpl<double>(operatorF64_, solverF64_, ginkgoTol);
 }
 
 
@@ -638,8 +643,10 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP64
     const scalar tolerance
 ) const
 {
+    // tolerance parameter is the effective Ginkgo reduction factor,
+    // computed by OGLSolverBase::solve() from relTol_ or tolerance_/initResidual
     label iters = solveImpl<double>(
-        psi, source, operatorF64_, solverF64_, tolerance_
+        psi, source, operatorF64_, solverF64_, tolerance
     );
 
     // Persist operator to static cache for next instantiation

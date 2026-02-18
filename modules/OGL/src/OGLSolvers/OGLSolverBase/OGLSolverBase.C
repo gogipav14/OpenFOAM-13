@@ -532,8 +532,29 @@ Foam::solverPerformance Foam::OGL::OGLSolverBase::solve
 
             if (initResidual >= tolerance_)
             {
+                // Compute an effective relative reduction factor for Ginkgo.
+                // Ginkgo's ResidualNorm criterion is relative:
+                //   ||r_k||/||r_0|| < factor
+                // When relTol > 0, use it directly (matches OpenFOAM's relTol).
+                // When relTol = 0 (e.g. pFinal), convert the absolute
+                // tolerance to an equivalent reduction factor:
+                //   factor = tolerance / initResidual
+                // so that ||r_k|| ~ tolerance * normFactor (approximately
+                // matching OpenFOAM's absolute convergence level).
+                scalar effectiveRelTol;
+                if (relTol_ > 0)
+                {
+                    effectiveRelTol = relTol_;
+                }
+                else
+                {
+                    effectiveRelTol = tolerance_ / initResidual;
+                    effectiveRelTol = max(effectiveRelTol, scalar(1e-8));
+                    effectiveRelTol = min(effectiveRelTol, scalar(1.0));
+                }
+
                 ScopedTimer t(timer_, PerformanceTimer::Category::SOLVE_KERNEL);
-                label iters = solveFP64(psi, source, tolerance_);
+                label iters = solveFP64(psi, source, effectiveRelTol);
                 solverPerf.nIterations() = iters;
             }
 

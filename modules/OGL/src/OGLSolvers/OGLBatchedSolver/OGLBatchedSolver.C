@@ -144,6 +144,7 @@ Foam::label Foam::OGL::OGLBatchedSolver::solveFP32
     auto resCrit = gko::share(
         gko::stop::ResidualNorm<float>::build()
             .with_reduction_factor(static_cast<float>(tolerance))
+            .with_baseline(gko::stop::mode::initial_resnorm)
             .on(exec)
     );
 
@@ -391,6 +392,7 @@ Foam::label Foam::OGL::OGLBatchedSolver::solveFP64
     auto resCrit = gko::share(
         gko::stop::ResidualNorm<double>::build()
             .with_reduction_factor(tolerance)
+            .with_baseline(gko::stop::mode::initial_resnorm)
             .on(exec)
     );
 

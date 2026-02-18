@@ -11,3 +11,5 @@ log.*
 benchmarks/preconditioner_results*
 benchmarks/scaling_results*
 papers/
+Dockerfile
+.dockerignore

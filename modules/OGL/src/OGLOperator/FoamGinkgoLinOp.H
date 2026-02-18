@@ -254,6 +254,13 @@ public:
             interfaceIntCoeffs_ = &interfaceIntCoeffs;
             interfaces_ = &interfaces;
             cmpt_ = cmpt;
+
+            // Also update the CSR converter's matrix pointer so it reads
+            // values from the current (not stale) matrix
+            if (csrConverter_.valid())
+            {
+                csrConverter_->updateMatrixPointer(matrix);
+            }
         }
 
         //- Access the local CSR matrix

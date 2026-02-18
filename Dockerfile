@@ -2,16 +2,16 @@
 # Multi-stage Dockerfile for OpenFOAM 13 + Ginkgo (GPU) + OGL + MixFOAM
 # =============================================================================
 # Build:   docker build -t mixfoam:latest .
-# Multi:   docker build --build-arg CUDA_ARCHS="75;80;86;89;120" -t mixfoam:latest .
+# Multi:   docker build --build-arg CUDA_ARCHS="80;89;120" -t mixfoam:latest .
 # Run:     docker run --rm --gpus all -v ./cases:/work -it mixfoam:latest
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Stage 1: builder – compile OpenFOAM, Ginkgo, and OGL from source
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.1.0-devel-ubuntu22.04 AS builder
 
-ARG CUDA_ARCHS="75"
+ARG CUDA_ARCHS="80;89;120"
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Build-time dependencies
@@ -41,16 +41,17 @@ ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
     OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
     USER=root
 
-# ---- Ginkgo v1.8.0 with CUDA ------------------------------------------------
-# Build for SM75 (Turing/T500) only to keep compile time and memory usage down.
-# To target additional GPUs, add architectures: "75;80;86;89"
+# ---- Ginkgo v1.11.0 with CUDA -----------------------------------------------
+# Target GPUs: A100 (SM80), Ada 6000 (SM89), RTX 5060 (SM120).
+# To add more architectures: "80;89;120;..."
 # GIT_SSL_NO_VERIFY works around missing CA bundle in nvidia/cuda base image.
 # -j4 limits parallelism to avoid OOM during heavy CUDA template compilation.
-RUN GIT_SSL_NO_VERIFY=1 git clone --depth 1 --branch v1.8.0 \
+RUN GIT_SSL_NO_VERIFY=1 git clone --depth 1 --branch v1.11.0 \
         https://github.com/ginkgo-project/ginkgo.git /tmp/ginkgo-src \
     && cmake -S /tmp/ginkgo-src -B /tmp/ginkgo-build \
         -DCMAKE_INSTALL_PREFIX=/opt/ginkgo \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/usr/local/cuda/lib64/cmake \
         -DGINKGO_BUILD_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
         -DGINKGO_BUILD_REFERENCE=ON \
@@ -90,9 +91,7 @@ RUN /bin/bash -c '\
 # Compile separately with nvcc before OGL build (gcc cannot compile .cu files).
 # The shared library is placed alongside Ginkgo's libs for simple linkage.
 RUN nvcc -O3 -shared -Xcompiler -fPIC \
-    -gencode arch=compute_75,code=sm_75 \
     -gencode arch=compute_80,code=sm_80 \
-    -gencode arch=compute_86,code=sm_86 \
     -gencode arch=compute_89,code=sm_89 \
     -gencode arch=compute_120,code=sm_120 \
     -o /opt/ginkgo/lib/libfftprecond.so \
@@ -104,9 +103,7 @@ RUN nvcc -O3 -shared -Xcompiler -fPIC \
 # GPU gather/scatter kernels for processor-boundary halo exchange.
 # No cuFFT dependency — pure CUDA kernels.
 RUN nvcc -O3 -shared -Xcompiler -fPIC \
-    -gencode arch=compute_75,code=sm_75 \
     -gencode arch=compute_80,code=sm_80 \
-    -gencode arch=compute_86,code=sm_86 \
     -gencode arch=compute_89,code=sm_89 \
     -gencode arch=compute_120,code=sm_120 \
     -o /opt/ginkgo/lib/libhalokernel.so \
@@ -127,7 +124,7 @@ RUN /bin/bash -o pipefail -c '\
 # ---------------------------------------------------------------------------
 # Stage 2: runtime – lean image with only what is needed to run simulations
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:13.1.0-devel-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -174,7 +171,8 @@ ENV WM_PROJECT_DIR=/opt/OpenFOAM-13 \
     FOAM_INST_DIR=/opt \
     GINKGO_ROOT=/opt/ginkgo \
     OMPI_ALLOW_RUN_AS_ROOT=1 \
-    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    USER=root
 
 # Library search path: Ginkgo + OpenFOAM platform libs + user libs (OGL)
 ENV LD_LIBRARY_PATH=/opt/ginkgo/lib:\

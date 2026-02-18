@@ -36,11 +36,11 @@ License
 
 void Foam::OGL::lduToCSR::buildStructure()
 {
-    const lduAddressing& addr = matrix_.lduAddr();
+    const lduAddressing& addr = matrixPtr_->lduAddr();
     const labelUList& upperAddr = addr.upperAddr();
     const labelUList& lowerAddr = addr.lowerAddr();
 
-    nRows_ = matrix_.diag().size();
+    nRows_ = matrixPtr_->diag().size();
     const label nFaces = upperAddr.size();
 
     // Check for int32 overflow (Ginkgo uses int for indices)
@@ -186,7 +186,7 @@ void Foam::OGL::lduToCSR::buildStructure()
 
 Foam::OGL::lduToCSR::lduToCSR(const lduMatrix& matrix)
 :
-    matrix_(matrix),
+    matrixPtr_(&matrix),
     nRows_(0),
     nNonZeros_(0),
     structureBuilt_(false)
@@ -213,11 +213,19 @@ void Foam::OGL::lduToCSR::updateValues()
         buildStructure();
     }
 
-    const scalarField& diag = matrix_.diag();
-    const scalarField& upper = matrix_.upper();
+    if (!matrixPtr_->hasDiag())
+    {
+        FatalErrorInFunction
+            << "lduMatrix diagonal not allocated. "
+            << "Cannot update CSR values from incomplete matrix."
+            << abort(FatalError);
+    }
+
+    const scalarField& diag = matrixPtr_->diag();
+    const scalarField& upper = matrixPtr_->upper();
 
     // Lower is same as upper for symmetric matrices, or separate for asymmetric
-    const scalarField& lower = matrix_.hasLower() ? matrix_.lower() : upper;
+    const scalarField& lower = matrixPtr_->hasLower() ? matrixPtr_->lower() : upper;
 
     // Fill diagonal values
     forAll(diag, i)

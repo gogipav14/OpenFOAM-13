@@ -88,8 +88,8 @@ private:
 
     // Private Data
 
-        //- Reference to the lduMatrix
-        const lduMatrix& matrix_;
+        //- Pointer to the lduMatrix (non-owning, updatable for caching)
+        const lduMatrix* matrixPtr_;
 
         //- Number of rows (cells)
         label nRows_;
@@ -158,6 +158,12 @@ public:
 
             //- Force rebuild of structure
             void rebuildStructure();
+
+            //- Update the matrix pointer (for solver caching)
+            void updateMatrixPointer(const lduMatrix& matrix)
+            {
+                matrixPtr_ = &matrix;
+            }
 
 
         // Value Updates
