@@ -598,6 +598,98 @@ def cmd_scaling(args):
     print(f"\nScaling results written to: {csv_path}")
 
 
+def cmd_compare(args):
+    """Run a single case with CPU and GPU variants side-by-side."""
+    case_path = Path(args.case_path).resolve()
+    if not case_path.exists():
+        print(f"Error: case not found: {case_path}")
+        return
+
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    bench_config = BenchmarkConfig(
+        max_timesteps=args.timesteps,
+        force_serial=True,
+        precision_policy=args.precision,
+        iterative_refinement=args.precision != "FP64",
+        debug_level=1 if args.verbose else 0,
+    )
+
+    run_config = RunConfig(
+        use_docker=args.docker,
+        docker_image=args.image,
+        gpu_runtime=True,
+        timeout=args.timeout,
+        verbose=args.verbose,
+    )
+
+    cpu_variant = args.cpu_variant
+    case_label = case_path.name
+
+    cpu_dir = results_dir / "cpu"
+    gpu_dir = results_dir / "gpu"
+
+    # Prepare CPU variant
+    print(f"Preparing CPU ({cpu_variant})...")
+    prepare_case(case_path, cpu_dir, cpu_variant, bench_config)
+    create_allrun_benchmark(cpu_dir, cpu_variant)
+
+    # Prepare GPU variant
+    print(f"Preparing GPU (OGLPCG, {args.precision})...")
+    prepare_case(case_path, gpu_dir, "gpu", bench_config)
+    create_allrun_benchmark(gpu_dir, "gpu")
+
+    # Run CPU
+    print(f"Running CPU...")
+    if run_config.use_docker:
+        cpu_metrics = run_case_docker(cpu_dir, run_config, variant="cpu")
+    else:
+        cpu_metrics = run_case_native(cpu_dir, run_config)
+    cpu_metrics.case_name = case_label
+    cpu_metrics.variant = "cpu"
+
+    # Run GPU
+    print(f"Running GPU...")
+    if run_config.use_docker:
+        gpu_metrics = run_case_docker(gpu_dir, run_config, variant="gpu")
+    else:
+        gpu_metrics = run_case_native(gpu_dir, run_config)
+    gpu_metrics.case_name = case_label
+    gpu_metrics.variant = "gpu"
+
+    # Save metrics
+    _save_metrics(cpu_metrics, results_dir / "cpu_metrics.json")
+    _save_metrics(gpu_metrics, results_dir / "gpu_metrics.json")
+
+    result = compare_results(cpu_metrics, gpu_metrics, category=case_label)
+
+    # Print results
+    print(f"\n{'='*70}")
+    print(f"COMPARISON: {case_label}")
+    print(f"{'='*70}")
+    if result.cpu_ok and result.gpu_ok:
+        print(f"  CPU ({cpu_variant}): {result.cpu_time_per_step:.4f} s/step, "
+              f"{result.cpu_iters_per_step:.0f} it/step, "
+              f"res={result.cpu_avg_residual:.2e}")
+        print(f"  GPU (OGLPCG):      {result.gpu_time_per_step:.4f} s/step, "
+              f"{result.gpu_iters_per_step:.0f} it/step, "
+              f"res={result.gpu_avg_residual:.2e}")
+        print(f"\n  Step speedup:   {result.step_time_speedup:.2f}x")
+        print(f"  NFE cost ratio: {result.nfe_cost_ratio:.3f}")
+        print(f"  Residual ratio: {result.residual_ratio:.2e}")
+        if result.cpu_time_per_nfe > 0 and result.gpu_time_per_nfe > 0:
+            print(f"  CPU ms/NFE:     {result.cpu_time_per_nfe*1000:.3f}")
+            print(f"  GPU ms/NFE:     {result.gpu_time_per_nfe*1000:.3f}")
+    else:
+        if not result.cpu_ok:
+            print(f"  CPU FAILED: {result.cpu_error}")
+        if not result.gpu_ok:
+            print(f"  GPU FAILED: {result.gpu_error}")
+
+    print(f"\nResults saved to: {results_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OpenFOAM Tutorial Benchmark Suite: CPU vs GPU comparison",
@@ -691,6 +783,34 @@ def main():
     scale_parser.add_argument("--verbose", "-v", action="store_true",
                               help="Verbose output")
 
+    # Compare command — single case CPU vs GPU
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help="Run a single case with CPU and GPU side-by-side",
+    )
+    compare_parser.add_argument("case_path",
+                                help="Path to an OpenFOAM case directory")
+    compare_parser.add_argument("--docker", action="store_true",
+                                help="Run in Docker container")
+    compare_parser.add_argument("--native", action="store_true",
+                                help="Run natively")
+    compare_parser.add_argument("--image", default="mixfoam:latest",
+                                help="Docker image name")
+    compare_parser.add_argument("--timesteps", type=int, default=50,
+                                help="Timesteps to run (default: 50)")
+    compare_parser.add_argument("--timeout", type=int, default=3600,
+                                help="Timeout per variant in seconds (default: 3600)")
+    compare_parser.add_argument("--precision", default="FP64",
+                                choices=["FP32", "FP64", "MIXED"],
+                                help="GPU precision (default: FP64)")
+    compare_parser.add_argument("--cpu-variant", default="cpu_pcg",
+                                choices=["cpu", "cpu_pcg"],
+                                help="CPU baseline variant (default: cpu_pcg)")
+    compare_parser.add_argument("--results-dir", default="./compare_results",
+                                help="Results output directory")
+    compare_parser.add_argument("--verbose", "-v", action="store_true",
+                                help="Verbose output")
+
     args = parser.parse_args()
 
     if args.command == "scan":
@@ -707,6 +827,11 @@ def main():
             print("Error: specify --docker or --native execution mode")
             sys.exit(1)
         cmd_scaling(args)
+    elif args.command == "compare":
+        if not args.docker and not args.native:
+            print("Error: specify --docker or --native execution mode")
+            sys.exit(1)
+        cmd_compare(args)
     else:
         parser.print_help()
 

@@ -222,6 +222,9 @@ def _build_inner_script(case_path: Path, host_uid: int = None) -> str:
     if (case_path / "system" / "topoSetDict").exists():
         parts.append("topoSet > log.topoSet 2>&1")
 
+    if (case_path / "system" / "snappyHexMeshDict").exists():
+        parts.append("snappyHexMesh -overwrite > log.snappyHexMesh 2>&1")
+
     # Determine solver
     solver_cmd = _detect_solver_command(case_path)
     parts.append(f"{solver_cmd} > log.{solver_cmd} 2>&1")
