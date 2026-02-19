@@ -1,0 +1,49 @@
+tep 7/28 : COPY . /opt/OpenFOAM-13
+ ---> e529253f1db2
+Step 8/28 : ENV FOAM_INST_DIR=/opt     WM_PROJECT_DIR=/opt/OpenFOAM-13
+ ---> Running in fe3b28497153
+ ---> Removed intermediate container fe3b28497153
+ ---> 323a754f3142
+Step 9/28 : RUN /bin/bash -c '    export FOAM_INST_DIR=/opt &&     export SCOTCH_TYPE=system &&     export WM_CONTINUE_ON_ERROR=1 &&     source /opt/OpenFOAM-13/etc/bashrc &&     cd /opt/OpenFOAM-13 &&     ./Allwmake -j"$(nproc)" 2>&1 | tail -40'     && test -x /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamRun     && echo "OpenFOAM build verified OK"
+ ---> Running in fb8f8c18228c
+/usr/bin/ld.bfd: cannot find -lOpenFOAM: No such file or directory
+collect2: error: ld returned 1 exit status
+make[2]: *** [/opt/OpenFOAM-13/wmake/makefiles/general:154: /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamToC] Error 1
+make[2]: Target 'all' not remade because of errors.
+make[1]: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: foamToC] Error 2
+g++ -std=c++14 -m64 -DLIB_NAME=libNULL.so -Dlinux64 -DWM_ARCH_OPTION=64 -DWM_DP -DWM_LABEL_SIZE=32 -Wall -Wextra -Wold-style-cast -Wnon-virtual-dtor -Wno-unused-parameter -Wno-invalid-offsetof -Wno-attributes -O3  -DNoRepository -ftemplate-depth-256  -IlnInclude -I. -I/opt/OpenFOAM-13/src/OpenFOAM/lnInclude -I/opt/OpenFOAM-13/src/OSspecific/POSIX/lnInclude   -fPIC -fuse-ld=bfd -Xlinker --add-needed -Xlinker --no-as-needed /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/applications/utilities/miscellaneous/foamDictionary/foamDictionary.o -L/opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/lib \
+    -lfiniteVolume -lOpenFOAM -ldl  \
+     -lm -o /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamDictionary
+/usr/bin/ld.bfd: cannot find -lfiniteVolume: No such file or directory
+/usr/bin/ld.bfd: cannot find -lOpenFOAM: No such file or directory
+collect2: error: ld returned 1 exit status
+make[2]: *** [/opt/OpenFOAM-13/wmake/makefiles/general:154: /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamDictionary] Error 1
+make[2]: Target 'all' not remade because of errors.
+make[1]: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: foamDictionary] Error 2
+make[1]: Target 'application' not remade because of errors.
+make: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: miscellaneous] Error 2
+g++ -std=c++14 -m64 -DLIB_NAME=libNULL.so -Dlinux64 -DWM_ARCH_OPTION=64 -DWM_DP -DWM_LABEL_SIZE=32 -Wall -Wextra -Wold-style-cast -Wnon-virtual-dtor -Wno-unused-parameter -Wno-invalid-offsetof -Wno-attributes -O3  -DNoRepository -ftemplate-depth-256 -I/opt/OpenFOAM-13/src/finiteVolume/lnInclude -I/opt/OpenFOAM-13/src/meshTools/lnInclude -IlnInclude -I. -I/opt/OpenFOAM-13/src/OpenFOAM/lnInclude -I/opt/OpenFOAM-13/src/OSspecific/POSIX/lnInclude   -fPIC -fuse-ld=bfd -Xlinker --add-needed -Xlinker --no-as-needed /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/applications/utilities/preProcessing/foamSetupCHT/foamSetupCHT.o -L/opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/lib \
+    -lfiniteVolume -lmeshTools -lOpenFOAM -ldl  \
+     -lm -o /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamSetupCHT
+/usr/bin/ld.bfd: cannot find -lfiniteVolume: No such file or directory
+/usr/bin/ld.bfd: cannot find -lmeshTools: No such file or directory
+/usr/bin/ld.bfd: cannot find -lOpenFOAM: No such file or directory
+collect2: error: ld returned 1 exit status
+make[2]: *** [/opt/OpenFOAM-13/wmake/makefiles/general:154: /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamSetupCHT] Error 1
+make[2]: Target 'all' not remade because of errors.
+make[1]: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: foamSetupCHT] Error 2
+make[1]: Target 'application' not remade because of errors.
+make: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: preProcessing] Error 2
+g++ -std=c++14 -m64 -DLIB_NAME=libNULL.so -Dlinux64 -DWM_ARCH_OPTION=64 -DWM_DP -DWM_LABEL_SIZE=32 -Wall -Wextra -Wold-style-cast -Wnon-virtual-dtor -Wno-unused-parameter -Wno-invalid-offsetof -Wno-attributes -O3  -DNoRepository -ftemplate-depth-256 -IchemkinReader -I/opt/OpenFOAM-13/src/thermophysicalModels/specie/lnInclude -I/opt/OpenFOAM-13/src/thermophysicalModels/multicomponentThermo/lnInclude -IlnInclude -I. -I/opt/OpenFOAM-13/src/OpenFOAM/lnInclude -I/opt/OpenFOAM-13/src/OSspecific/POSIX/lnInclude   -fPIC -fuse-ld=bfd -Xlinker --add-needed -Xlinker --no-as-needed /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/applications/utilities/thermophysical/chemkinToFoam/chemkinReader/chemkinReader.o /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/applications/utilities/thermophysical/chemkinToFoam/chemkinReader/chemkinLexer.o /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/applications/utilities/thermophysical/chemkinToFoam/chemkinToFoam.o -L/opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/lib \
+    -lchemistryModel -lOpenFOAM -ldl  \
+     -lm -o /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/chemkinToFoam
+/usr/bin/ld.bfd: cannot find -lchemistryModel: No such file or directory
+/usr/bin/ld.bfd: cannot find -lOpenFOAM: No such file or directory
+collect2: error: ld returned 1 exit status
+make[2]: *** [/opt/OpenFOAM-13/wmake/makefiles/general:154: /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/chemkinToFoam] Error 1
+make[2]: Target 'all' not remade because of errors.
+make[1]: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: chemkinToFoam] Error 2
+make[1]: Target 'application' not remade because of errors.
+make: *** [/opt/OpenFOAM-13/wmake/makefiles/apps:39: thermophysical] Error 2
+make: Target 'application' not remade because of errors.
+The command '/bin/sh -c /bin/bash -c '    export FOAM_INST_DIR=/opt &&     export SCOTCH_TYPE=system &&     export WM_CONTINUE_ON_ERROR=1 &&     source /opt/OpenFOAM-13/etc/bashrc &&     cd /opt/OpenFOAM-13 &&     ./Allwmake -j"$(nproc)" 2>&1 | tail -40'     && test -x /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamRun     && echo "OpenFOAM build verified OK"' returned a non-zero code: 1
