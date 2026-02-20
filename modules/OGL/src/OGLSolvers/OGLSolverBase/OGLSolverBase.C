@@ -161,13 +161,22 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
         {
             preconditionerType_ = PreconditionerType::FFT_BLOCK_JACOBI;
         }
+        else if (precondStr == "multigrid")
+        {
+            preconditionerType_ = PreconditionerType::MULTIGRID;
+        }
+        else if (precondStr == "ILU")
+        {
+            preconditionerType_ = PreconditionerType::ILU;
+        }
         else
         {
             FatalIOErrorInFunction(oglDict)
                 << "Unknown preconditioner: " << precondStr << nl
                 << "Valid options: Jacobi, blockJacobi, ISAI, "
                 << "blockJacobiISAI, bjIsaiSandwich, bjIsaiAdditive, "
-                << "bjIsaiGmres, bjIsaiInnerOuter, FFT, fftBlockJacobi"
+                << "bjIsaiGmres, bjIsaiInnerOuter, FFT, fftBlockJacobi, "
+                << "multigrid, ILU"
                 << abort(FatalIOError);
         }
 
@@ -199,6 +208,49 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
                     << meshSpacing_.x() << ", "
                     << meshSpacing_.y() << ", "
                     << meshSpacing_.z() << ")"
+                    << endl;
+            }
+        }
+
+        // Multigrid preconditioner settings
+        if (preconditionerType_ == PreconditionerType::MULTIGRID)
+        {
+            mgMaxLevels_ = oglDict.lookupOrDefault<label>
+            (
+                "mgMaxLevels", 10
+            );
+            mgMinCoarseRows_ = oglDict.lookupOrDefault<label>
+            (
+                "mgMinCoarseRows", 64
+            );
+            mgSmootherIters_ = oglDict.lookupOrDefault<label>
+            (
+                "mgSmootherIters", 2
+            );
+            mgSmootherRelax_ = oglDict.lookupOrDefault<scalar>
+            (
+                "mgSmootherRelax", 0.9
+            );
+            mgSmoother_ = oglDict.lookupOrDefault<word>
+            (
+                "mgSmoother", "jacobi"
+            );
+            mgCacheInterval_ = oglDict.lookupOrDefault<label>
+            (
+                "mgCacheInterval", 10
+            );
+            mgCacheMaxIters_ = oglDict.lookupOrDefault<label>
+            (
+                "mgCacheMaxIters", 200
+            );
+
+            if (debug_ >= 1)
+            {
+                Info<< "    Multigrid: maxLevels=" << mgMaxLevels_
+                    << " minCoarseRows=" << mgMinCoarseRows_
+                    << " smoother=" << mgSmoother_
+                    << " smootherIters=" << mgSmootherIters_
+                    << " smootherRelax=" << mgSmootherRelax_
                     << endl;
             }
         }
@@ -488,7 +540,14 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     blockSize_(4),
     isaiSparsityPower_(1),
     fftDimensions_(0, 0, 0),
-    meshSpacing_(0, 0, 0)
+    meshSpacing_(0, 0, 0),
+    mgMaxLevels_(10),
+    mgMinCoarseRows_(64),
+    mgSmootherIters_(2),
+    mgSmootherRelax_(0.9),
+    mgSmoother_("jacobi"),
+    mgCacheInterval_(10),
+    mgCacheMaxIters_(200)
 {
     readOGLControls();
 

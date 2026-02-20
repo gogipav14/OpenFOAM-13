@@ -118,6 +118,10 @@ private:
         labelList upperToCsr_;
         labelList lowerToCsr_;
 
+        //- Gershgorin estimate of maximum eigenvalue
+        //  max_i(|a_ii| + sum_{j!=i} |a_ij|), computed during updateValues()
+        double lambdaMax_;
+
 
     // Private Member Functions
 
@@ -217,6 +221,9 @@ public:
 
             //- Access values (F32)
             const std::vector<float>& valuesF32() const { return valuesF32_; }
+
+            //- Gershgorin estimate of maximum eigenvalue
+            double lambdaMax() const { return lambdaMax_; }
 };
 
 

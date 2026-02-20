@@ -276,6 +276,13 @@ public:
             return matrix_->diag().size();
         }
 
+        //- Gershgorin estimate of max eigenvalue (from CSR assembly)
+        double lambdaMax() const
+        {
+            updateMatrix();
+            return csrConverter_->lambdaMax();
+        }
+
         //- Create a compatible Ginkgo dense vector
         std::shared_ptr<Vector> createVector() const;
 

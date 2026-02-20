@@ -34,6 +34,14 @@ class BenchmarkConfig:
     # FFT preconditioner settings (required when preconditioner = FFT or fftBlockJacobi)
     fft_dimensions: tuple = None    # (nx, ny, nz) grid dimensions
     mesh_spacing: tuple = None      # (dx, dy, dz) cell spacing
+    # Multigrid preconditioner settings (when preconditioner = multigrid)
+    mg_max_levels: int = 10
+    mg_min_coarse_rows: int = 64
+    mg_smoother_iters: int = 2
+    mg_smoother_relax: float = 0.9
+    mg_smoother: str = "jacobi"  # jacobi, chebyshev, blockJacobi
+    mg_cache_interval: int = 0   # 0=rebuild every call, N>0=rebuild every N calls
+    mg_cache_max_iters: int = 200  # force rebuild if iters exceed this
 
 
 # Template for OGLPCG solver entry in fvSolution
@@ -53,6 +61,25 @@ OGLPCG_TEMPLATE = """    {{
             preconditioner      {preconditioner};
             blockSize           {blockSize};
             isaiSparsityPower   {isaiSparsityPower};{fftEntries}
+        }}
+    }}"""
+
+# Template for OGLBiCGStab solver entry in fvSolution (asymmetric fields: U, k, epsilon)
+OGLBICGSTAB_TEMPLATE = """    {{
+        solver          OGLBiCGStab;
+        tolerance       {tolerance};
+        relTol          {relTol};
+        OGLCoeffs
+        {{
+            precisionPolicy     {precisionPolicy};
+            iterativeRefinement {iterativeRefinement};
+            maxRefineIters      {maxRefineIters};
+            innerTolerance      {innerTolerance};
+            cacheStructure      {cacheStructure};
+            cacheValues         false;
+            debug               {debug};
+            preconditioner      {preconditioner};
+            blockSize           {blockSize};
         }}
     }}"""
 
@@ -114,8 +141,12 @@ def modify_fvsolution(case_path: Path, variant: str, config: BenchmarkConfig):
 
     content = fvsolution.read_text()
 
-    if variant == "gpu":
+    if variant in ("gpu", "gpu_mg"):
         content = _replace_pressure_solver_gpu(content, config)
+    elif variant == "gpu_bicgstab":
+        # GPU pressure (OGLPCG) + GPU momentum (OGLBiCGStab)
+        content = _replace_pressure_solver_gpu(content, config)
+        content = _replace_momentum_solver_gpu(content, config)
     elif variant == "cpu_pcg":
         # Force PCG+DIC for fair Krylov-vs-Krylov comparison
         content = _replace_pressure_solver_cpu(content, config)
@@ -143,6 +174,18 @@ def _replace_pressure_solver_gpu(content: str, config: BenchmarkConfig) -> str:
         fft_entries = (
             f"\n            fftDimensions     ({nx} {ny} {nz});"
             f"\n            meshSpacing       ({dx} {dy} {dz});"
+        )
+
+    # Build multigrid entries if needed
+    if config.preconditioner == "multigrid":
+        fft_entries += (
+            f"\n            mgMaxLevels       {config.mg_max_levels};"
+            f"\n            mgMinCoarseRows   {config.mg_min_coarse_rows};"
+            f"\n            mgSmootherIters   {config.mg_smoother_iters};"
+            f"\n            mgSmootherRelax   {config.mg_smoother_relax};"
+            f"\n            mgSmoother        {config.mg_smoother};"
+            f"\n            mgCacheInterval   {config.mg_cache_interval};"
+            f"\n            mgCacheMaxIters   {config.mg_cache_max_iters};"
         )
 
     for pfield in pressure_fields:
@@ -185,6 +228,88 @@ def _replace_pressure_solver_cpu(content: str, config: BenchmarkConfig) -> str:
             )
         )
 
+    return content
+
+
+def _replace_momentum_solver_gpu(content: str, config: BenchmarkConfig) -> str:
+    """Replace momentum/turbulence solver entries with OGLBiCGStab.
+
+    Handles both explicit field names (U, UFinal) and OpenFOAM regex
+    patterns like ``"(U|k|epsilon|omega|R|nuTilda).*"``.
+    """
+    momentum_fields = [
+        'U', 'UFinal',
+        'k', 'kFinal',
+        'epsilon', 'epsilonFinal',
+        'omega', 'omegaFinal',
+        'nuTilda', 'nuTildaFinal',
+    ]
+
+    def _bicgstab_block(relTol):
+        return OGLBICGSTAB_TEMPLATE.format(
+            tolerance=1e-6,
+            relTol=relTol,
+            precisionPolicy=config.precision_policy,
+            iterativeRefinement="on" if config.iterative_refinement else "off",
+            maxRefineIters=config.max_refine_iters,
+            innerTolerance=config.inner_tolerance,
+            cacheStructure="true" if config.cache_structure else "false",
+            debug=config.debug_level,
+            preconditioner=config.preconditioner,
+            blockSize=config.block_size,
+        )
+
+    # First, try replacing explicit field names
+    for field in momentum_fields:
+        content = _replace_solver_block(
+            content, field, _bicgstab_block(
+                0.1 if "Final" not in field else 0
+            )
+        )
+
+    # Also replace OpenFOAM regex-pattern blocks that cover momentum fields.
+    # Common patterns: "(U|k|epsilon|omega|R|nuTilda).*", "(U|k|epsilon)Final"
+    content = _replace_regex_momentum_blocks(
+        content, _bicgstab_block(0.1), _bicgstab_block(0)
+    )
+
+    return content
+
+
+def _replace_regex_momentum_blocks(
+    content: str, replacement: str, replacement_final: str
+) -> str:
+    """Replace regex-pattern solver blocks that match momentum fields.
+
+    Finds entries like ``"(U|k|epsilon|omega|R|nuTilda).*"`` and replaces
+    them with the GPU solver block.  Handles both non-Final and Final
+    variants.
+    """
+    # Match quoted regex patterns containing U or k (momentum indicators)
+    # e.g. "(U|k|epsilon|omega|R|nuTilda).*"
+    pattern = r'("?\([^)]*U[^)]*\)[^"]*"?)\s*\{'
+
+    # Collect all matches with their brace ranges, then replace back-to-front
+    # to avoid offset invalidation and infinite re-matching.
+    replacements = []
+    for match in re.finditer(pattern, content):
+        start = match.start()
+        brace_start = content.index('{', start)
+        end = _find_matching_brace(content, brace_start)
+        if end > 0:
+            field_label = match.group(1)
+            is_final = 'Final' in field_label
+            repl = replacement_final if is_final else replacement
+            replacements.append((start, end, field_label, repl))
+
+    # Apply replacements back-to-front
+    for start, end, field_label, repl in reversed(replacements):
+        content = (
+            content[:start]
+            + field_label + "\n"
+            + repl + "\n"
+            + content[end + 1:]
+        )
     return content
 
 
@@ -276,7 +401,7 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
     content = controldict.read_text()
 
     # For GPU variant, add libs entry for OGL
-    if variant == "gpu":
+    if variant in ("gpu", "gpu_mg", "gpu_bicgstab"):
         if 'libOGL.so' not in content:
             # Add libs directive before the closing comment or at end
             libs_entry = '\nlibs ("libOGL.so");\n'

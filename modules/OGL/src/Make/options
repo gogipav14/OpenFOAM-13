@@ -17,7 +17,8 @@ EXE_INC = \
     -IOGLUtils \
     -IOGLSolvers/OGLSolverBase \
     -IOGLSolvers/OGLPCGSolver \
-    -IOGLSolvers/OGLBatchedSolver
+    -IOGLSolvers/OGLBatchedSolver \
+    -IOGLSolvers/OGLBiCGStabSolver
 
 LIB_LIBS = \
     -lOpenFOAM \

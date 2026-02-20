@@ -28,8 +28,10 @@ License
 #include "FP32CastWrapper.H"
 #include "AdditiveLinOp.H"
 #include "FFTPreconditioner.H"
+#include "HaloKernels.h"
 #include "addToRunTimeSelectionTable.H"
 
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -50,6 +52,8 @@ namespace OGL
 std::map<Foam::word, Foam::OGL::OGLPCGSolver::SolverCache>
     Foam::OGL::OGLPCGSolver::cache_;
 std::mutex Foam::OGL::OGLPCGSolver::cacheMutex_;
+std::map<Foam::word, Foam::label> Foam::OGL::OGLPCGSolver::mgCallCount_;
+std::map<Foam::word, Foam::label> Foam::OGL::OGLPCGSolver::mgLastIters_;
 
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
@@ -394,6 +398,157 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
                 .on(exec)
                 ->generate(op->localMatrix());
         }
+        else if (preconditionerType_ == PreconditionerType::MULTIGRID)
+        {
+            // AMG preconditioner: 1 V-cycle of Multigrid as PCG preconditioner.
+            // Coarsening: Parallel Graph Matching (PGM).
+            // Smoother: Chebyshev (no inner products) or Jacobi.
+
+            // Build smoother factory
+            std::shared_ptr<gko::LinOpFactory> smootherFactory;
+
+            if (mgSmoother_ == "chebyshev")
+            {
+                // Jacobi-preconditioned Chebyshev polynomial smoother.
+                //
+                // For SPD M-matrices (discrete Laplacian in any dimension),
+                // λ_max(D⁻¹A) ≤ 2 universally (Gershgorin: row sums of
+                // D⁻¹A = 1 + off-diag/diag ≤ 2 by diagonal dominance).
+                // Galerkin coarse-grid operators preserve the M-matrix
+                // property, so these fixed foci work at ALL multigrid levels.
+                //
+                // Standard AMG Chebyshev (cf. hypre, PETSc):
+                //   upper = 1.1 * λ_max(D⁻¹A) = 2.2  (10% safety margin)
+                //   lower = upper / 30 ≈ 0.073         (standard ratio)
+                constexpr ValueType chebyUpper = static_cast<ValueType>(2.2);
+                constexpr ValueType chebyLower =
+                    chebyUpper / static_cast<ValueType>(30);
+
+                auto jacInner = gko::share(
+                    gko::preconditioner::Jacobi<ValueType, int>::build()
+                        .with_max_block_size(1u)
+                        .on(exec)
+                );
+
+                auto chebyFactory = gko::share(
+                    gko::solver::Chebyshev<ValueType>::build()
+                        .with_foci(std::pair<ValueType, ValueType>(
+                            chebyLower, chebyUpper
+                        ))
+                        .with_preconditioner(jacInner)
+                        .with_criteria(
+                            gko::stop::Iteration::build()
+                                .with_max_iters(
+                                    static_cast<gko::size_type>(
+                                        mgSmootherIters_
+                                    )
+                                )
+                                .on(exec)
+                        )
+                        .on(exec)
+                );
+                smootherFactory = chebyFactory;
+            }
+            else if (mgSmoother_ == "blockJacobi")
+            {
+                auto bjFactory = gko::share(
+                    gko::preconditioner::Jacobi<ValueType, int>::build()
+                        .with_max_block_size(
+                            static_cast<unsigned>(blockSize_)
+                        )
+                        .on(exec)
+                );
+                smootherFactory = gko::share(
+                    gko::solver::build_smoother(
+                        bjFactory,
+                        static_cast<gko::size_type>(mgSmootherIters_),
+                        static_cast<ValueType>(mgSmootherRelax_)
+                    )
+                );
+            }
+            else
+            {
+                // Default: scalar Jacobi smoother
+                auto jacFactory = gko::share(
+                    gko::preconditioner::Jacobi<ValueType, int>::build()
+                        .with_max_block_size(1u)
+                        .on(exec)
+                );
+                smootherFactory = gko::share(
+                    gko::solver::build_smoother(
+                        jacFactory,
+                        static_cast<gko::size_type>(mgSmootherIters_),
+                        static_cast<ValueType>(mgSmootherRelax_)
+                    )
+                );
+            }
+
+            // PGM coarsening (deterministic for reproducibility)
+            auto pgmFactory = gko::share(
+                gko::multigrid::Pgm<ValueType, int>::build()
+                    .with_deterministic(true)
+                    .on(exec)
+            );
+
+            // 1 V-cycle multigrid as preconditioner
+            auto mgFactory = gko::share(
+                gko::solver::Multigrid::build()
+                    .with_mg_level(pgmFactory)
+                    .with_pre_smoother(smootherFactory)
+                    .with_post_uses_pre(true)
+                    .with_max_levels(
+                        static_cast<gko::size_type>(mgMaxLevels_)
+                    )
+                    .with_min_coarse_rows(
+                        static_cast<gko::size_type>(mgMinCoarseRows_)
+                    )
+                    .with_criteria(
+                        gko::stop::Iteration::build()
+                            .with_max_iters(1u)
+                            .on(exec)
+                    )
+                    .on(exec)
+            );
+
+            // Time the hierarchy generation (PGM coarsening + Galerkin ops)
+            exec->synchronize();
+
+            // VRAM profiling: measure before generate
+            size_t vramFreeBefore = 0, vramTotal = 0;
+            haloGetGpuMemInfo(&vramFreeBefore, &vramTotal);
+
+            auto mgStart = std::chrono::high_resolution_clock::now();
+
+            solver = gko::solver::Cg<ValueType>::build()
+                .with_preconditioner(mgFactory)
+                .with_criteria(iterCrit, resCrit)
+                .on(exec)
+                ->generate(op->localMatrix());
+
+            exec->synchronize();
+            auto mgEnd = std::chrono::high_resolution_clock::now();
+
+            // VRAM profiling: measure after generate
+            size_t vramFreeAfter = 0, vramDummy = 0;
+            haloGetGpuMemInfo(&vramFreeAfter, &vramDummy);
+            // Use signed arithmetic to handle freed memory (old cache released)
+            long mgVramDelta =
+                static_cast<long>(vramFreeBefore)
+              - static_cast<long>(vramFreeAfter);
+
+            double mgSetupMs = std::chrono::duration<double, std::milli>(
+                mgEnd - mgStart
+            ).count();
+
+            if (debug_ >= 1)
+            {
+                Info<< "OGLPCGSolver: MG hierarchy setup: "
+                    << mgSetupMs << " ms, VRAM delta: "
+                    << mgVramDelta / (1024*1024) << " MB (total: "
+                    << vramTotal / (1024*1024) << " MB, free: "
+                    << vramFreeAfter / (1024*1024) << " MB)" << endl;
+            }
+        }
         else
         {
             // Factory-based preconditioner path
@@ -463,28 +618,111 @@ Foam::label Foam::OGL::OGLPCGSolver::solveImpl
 
     try
     {
-        // Update solver if needed
-        if (!solver)
-        {
-            updateSolverImpl(op, solver, tolerance);
-        }
-        else
-        {
-            // Solver exists (cached) — update matrix pointers and
-            // invalidate values so CSR values refresh in-place
-            op->updatePointers
-            (
-                matrix_,
-                interfaceBouCoeffs_,
-                interfaceIntCoeffs_,
-                interfaces_,
-                0  // cmpt
-            );
+        // Decide whether to rebuild the solver or reuse the cached one.
+        //
+        // For multigrid with mgCacheInterval > 0, we can reuse the
+        // solver (including its stale MG hierarchy) between rebuilds.
+        // CG correctness is maintained because CG only requires the
+        // system matrix (A*x) to be correct — the preconditioner
+        // affects convergence rate, not the solution.  The stale MG
+        // hierarchy is still SPD and a reasonable preconditioner as
+        // long as the matrix hasn't changed dramatically.
+        //
+        // Rebuild is triggered by:
+        //  (a) no cached solver exists (first call), or
+        //  (b) call counter reaches mgCacheInterval, or
+        //  (c) previous solve exceeded mgCacheMaxIters
+        bool needRebuild = true;
 
-            if (!cacheValues_)
+        if
+        (
+            solver
+         && preconditionerType_ == PreconditionerType::MULTIGRID
+         && mgCacheInterval_ > 0
+        )
+        {
+            // Check if we can reuse cached solver
+            label callCount = 0;
+            label lastIters = 0;
             {
-                op->invalidateValues();
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                callCount = mgCallCount_[fieldName_];
+                lastIters = mgLastIters_[fieldName_];
             }
+
+            // Warm-up: always rebuild during the first interval to
+            // establish a stable matrix pattern before caching.
+            // This avoids catastrophic divergence during startup
+            // transients where the matrix changes dramatically.
+            bool warmupDone = callCount >= mgCacheInterval_;
+            bool intervalOk = (callCount % mgCacheInterval_) != 0;
+            bool itersOk = lastIters < mgCacheMaxIters_;
+
+            if (warmupDone && intervalOk && itersOk)
+            {
+                // Reuse cached solver — just update CSR values
+                op->updatePointers
+                (
+                    matrix_,
+                    interfaceBouCoeffs_,
+                    interfaceIntCoeffs_,
+                    interfaces_,
+                    0
+                );
+
+                if (!cacheValues_)
+                {
+                    op->invalidateValues();
+                }
+
+                // Force CSR value refresh for the system matrix.
+                // The cached CG solver references this CSR object,
+                // so updating values in-place is sufficient.
+                op->localMatrix();
+
+                needRebuild = false;
+
+                if (debug_ >= 1)
+                {
+                    Info<< "OGLPCGSolver: Reusing cached MG hierarchy"
+                        << " (call " << callCount
+                        << ", last iters " << lastIters << ")"
+                        << endl;
+                }
+            }
+            else if (debug_ >= 1)
+            {
+                Info<< "OGLPCGSolver: Rebuilding MG hierarchy"
+                    << " (call " << callCount
+                    << ", interval " << mgCacheInterval_
+                    << ", last iters " << lastIters
+                    << ", max " << mgCacheMaxIters_ << ")"
+                    << endl;
+            }
+        }
+
+        if (needRebuild)
+        {
+            if (op)
+            {
+                // Operator exists — update pointers and invalidate
+                op->updatePointers
+                (
+                    matrix_,
+                    interfaceBouCoeffs_,
+                    interfaceIntCoeffs_,
+                    interfaces_,
+                    0
+                );
+
+                if (!cacheValues_)
+                {
+                    op->invalidateValues();
+                }
+            }
+
+            // Full rebuild: operator + solver + preconditioner
+            updateSolverImpl(op, solver, tolerance);
         }
 
         // Convert to Ginkgo vectors using appropriate precision
@@ -507,14 +745,38 @@ Foam::label Foam::OGL::OGLPCGSolver::solveImpl
         auto logger = gko::share(gko::log::Convergence<ValueType>::create());
         solver->add_logger(logger);
 
-        // Solve with error handling
+        // Solve with error handling — time the CG iterations
+        exec->synchronize();
+        auto solveStart = std::chrono::high_resolution_clock::now();
+
         solver->apply(b.get(), x.get());
 
         // Synchronize to ensure solve completed
         OGLExecutor::instance().synchronize();
 
+        auto solveEnd = std::chrono::high_resolution_clock::now();
+        double solveMs = std::chrono::duration<double, std::milli>(
+            solveEnd - solveStart
+        ).count();
+
         // Get iteration count
         numIters = static_cast<label>(logger->get_num_iterations());
+
+        // Update MG call counter and iteration tracking
+        if (preconditionerType_ == PreconditionerType::MULTIGRID)
+        {
+            std::lock_guard<std::mutex> lock(cacheMutex_);
+            mgCallCount_[fieldName_]++;
+            mgLastIters_[fieldName_] = numIters;
+        }
+
+        if (debug_ >= 1)
+        {
+            Info<< "OGLPCGSolver: CG solve: " << solveMs << " ms, "
+                << numIters << " iters, "
+                << (numIters > 0 ? solveMs / numIters : 0)
+                << " ms/iter" << endl;
+        }
 
         // Check if solver converged
         if (logger->has_converged())
@@ -626,10 +888,20 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP32
         static_cast<float>(innerTolerance_)
     );
 
-    // Persist operator to static cache for next instantiation
+    // Persist to static cache.  For multigrid with caching enabled,
+    // also persist the solver (including MG hierarchy) for reuse.
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
         cache_[fieldName_].opF32 = operatorF32_;
+
+        if
+        (
+            preconditionerType_ == PreconditionerType::MULTIGRID
+         && mgCacheInterval_ > 0
+        )
+        {
+            cache_[fieldName_].solverF32 = solverF32_;
+        }
     }
 
     return iters;
@@ -649,10 +921,20 @@ Foam::label Foam::OGL::OGLPCGSolver::solveFP64
         psi, source, operatorF64_, solverF64_, tolerance
     );
 
-    // Persist operator to static cache for next instantiation
+    // Persist to static cache.  For multigrid with caching enabled,
+    // also persist the solver (including MG hierarchy) for reuse.
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
         cache_[fieldName_].opF64 = operatorF64_;
+
+        if
+        (
+            preconditionerType_ == PreconditionerType::MULTIGRID
+         && mgCacheInterval_ > 0
+        )
+        {
+            cache_[fieldName_].solverF64 = solverF64_;
+        }
     }
 
     return iters;
@@ -685,10 +967,9 @@ Foam::OGL::OGLPCGSolver::OGLPCGSolver
     solverF32_(nullptr),
     solverF64_(nullptr)
 {
-    // Restore cached operator from previous instantiation (if any).
-    // Only the operator (with its GPU CSR matrix) is cached — NOT the
-    // Ginkgo solver, because the solver's preconditioner (Jacobi blocks)
-    // depends on the matrix values and must be regenerated each corrector.
+    // Restore cached state from previous instantiation (if any).
+    // Always restore operators (GPU CSR structure).
+    // For multigrid with caching: also restore solver (MG hierarchy).
     {
         std::lock_guard<std::mutex> lock(cacheMutex_);
         auto it = cache_.find(fieldName);
@@ -696,12 +977,23 @@ Foam::OGL::OGLPCGSolver::OGLPCGSolver
         {
             operatorF32_ = it->second.opF32;
             operatorF64_ = it->second.opF64;
-            // solverF32_/solverF64_ left as nullptr — will be regenerated
+
+            if
+            (
+                preconditionerType_ == PreconditionerType::MULTIGRID
+             && mgCacheInterval_ > 0
+            )
+            {
+                solverF32_ = it->second.solverF32;
+                solverF64_ = it->second.solverF64;
+            }
+            // else solverF32_/solverF64_ left as nullptr — rebuilt each call
 
             if (debug_ >= 2)
             {
-                Info<< "OGLPCGSolver: Restored cached operator for "
-                    << fieldName << endl;
+                Info<< "OGLPCGSolver: Restored cached "
+                    << (solverF64_ ? "solver+operator" : "operator")
+                    << " for " << fieldName << endl;
             }
         }
     }
@@ -727,6 +1019,7 @@ Foam::OGL::OGLPCGSolver::OGLPCGSolver
                     case PreconditionerType::BJ_ISAI_INNER_OUTER: return "bjIsaiInnerOuter";
                     case PreconditionerType::FFT: return "FFT";
                     case PreconditionerType::FFT_BLOCK_JACOBI: return "fftBlockJacobi";
+                    case PreconditionerType::MULTIGRID: return "multigrid";
                     default: return "unknown";
                 }
             }()

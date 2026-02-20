@@ -189,7 +189,8 @@ Foam::OGL::lduToCSR::lduToCSR(const lduMatrix& matrix)
     matrixPtr_(&matrix),
     nRows_(0),
     nNonZeros_(0),
-    structureBuilt_(false)
+    structureBuilt_(false),
+    lambdaMax_(0.0)
 {
     buildStructure();
     updateValues();
@@ -243,6 +244,35 @@ void Foam::OGL::lduToCSR::updateValues()
     forAll(lower, i)
     {
         valuesF64_[lowerToCsr_[i]] = lower[i];
+    }
+
+    // Compute Gershgorin row-sum estimate of maximum eigenvalue:
+    // λ_max ≈ max_i( |a_ii| + Σ_{j≠i} |a_ij| )
+    // Zero extra cost — we already touched all LDU values above.
+    {
+        const lduAddressing& addr = matrixPtr_->lduAddr();
+        const labelUList& upperAddr = addr.upperAddr();
+        const labelUList& lowerAddr = addr.lowerAddr();
+
+        // Start with diagonal absolute values
+        scalarField rowSums(nRows_, 0.0);
+        forAll(diag, i)
+        {
+            rowSums[i] = mag(diag[i]);
+        }
+
+        // Add off-diagonal contributions
+        forAll(upper, facei)
+        {
+            rowSums[lowerAddr[facei]] += mag(upper[facei]);
+            rowSums[upperAddr[facei]] += mag(lower[facei]);
+        }
+
+        lambdaMax_ = 0.0;
+        forAll(rowSums, i)
+        {
+            lambdaMax_ = std::max(lambdaMax_, double(rowSums[i]));
+        }
     }
 }
 

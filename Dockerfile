@@ -14,7 +14,7 @@ FROM nvidia/cuda:13.1.0-devel-ubuntu22.04 AS builder
 ARG CUDA_ARCHS="80;89;120"
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Build-time dependencies
+# Build-time dependencies (includes ccache for faster rebuilds and rsync for dev workflow)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         flex \
@@ -31,8 +31,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         wget \
         ca-certificates \
+        ccache \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
+
+# ccache: compiler cache for faster rebuilds.
+# With BuildKit cache mounts, ccache persists across docker build invocations.
+# Usage: DOCKER_BUILDKIT=1 docker build -t mixfoam:latest .
+ENV PATH=/usr/lib/ccache:$PATH \
+    CCACHE_DIR=/ccache \
+    CCACHE_MAXSIZE=5G
 
 # Allow MPI to run as root inside the container.
 # USER must be set so that OpenFOAM's bashrc builds correct FOAM_USER_LIBBIN
@@ -74,10 +82,13 @@ COPY . /opt/OpenFOAM-13
 ENV FOAM_INST_DIR=/opt \
     WM_PROJECT_DIR=/opt/OpenFOAM-13
 
-# Compile OpenFOAM
+# Compile OpenFOAM (with ccache for faster rebuilds)
 # Allwmake continues past optional components (zoltan, metis, etc.) so we
 # cannot use pipefail.  Instead, verify key binaries exist afterward.
-RUN /bin/bash -c '\
+# The --mount=type=cache persists ccache across docker build invocations
+# (requires DOCKER_BUILDKIT=1).
+RUN --mount=type=cache,target=/ccache \
+    /bin/bash -c '\
     export FOAM_INST_DIR=/opt && \
     export SCOTCH_TYPE=system && \
     export WM_CONTINUE_ON_ERROR=1 && \
@@ -113,7 +124,8 @@ RUN nvcc -O3 -shared -Xcompiler -fPIC \
 # ---- OGL (OpenFOAM Ginkgo Layer) ------------------------------------------
 ENV GINKGO_ROOT=/opt/ginkgo
 
-RUN /bin/bash -o pipefail -c '\
+RUN --mount=type=cache,target=/ccache \
+    /bin/bash -o pipefail -c '\
     export FOAM_INST_DIR=/opt && \
     export SCOTCH_TYPE=system && \
     source /opt/OpenFOAM-13/etc/bashrc && \
@@ -128,11 +140,14 @@ FROM nvidia/cuda:13.1.0-devel-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime-only packages
+# Runtime packages + dev headers needed for incremental OGL compilation
+# (libopenmpi-dev provides mpi.h; libscotch-dev for scotch headers)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libscotch-6.1 \
+        libscotch-dev \
         libptscotch-6.1 \
         libopenmpi3 \
+        libopenmpi-dev \
         openmpi-bin \
         python3 \
         python3-pip \
@@ -151,8 +166,9 @@ RUN pip3 install --no-cache-dir \
 
 # ---- Copy built artefacts from builder ------------------------------------
 
-# Ginkgo shared libraries
+# Ginkgo shared libraries + headers (headers needed for dev container workflow)
 COPY --from=builder /opt/ginkgo/lib /opt/ginkgo/lib
+COPY --from=builder /opt/ginkgo/include /opt/ginkgo/include
 
 # Full OpenFOAM installation (binaries, libraries, etc, tutorials, ...)
 COPY --from=builder /opt/OpenFOAM-13 /opt/OpenFOAM-13

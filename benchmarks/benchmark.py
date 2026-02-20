@@ -49,12 +49,37 @@ from log_parser import (
     parse_solver_log, compute_metrics, find_solver_log,
     BenchmarkMetrics, format_metrics_table,
 )
-from runner import run_case_docker, run_case_native, RunConfig
+from runner import run_case_docker, run_case_native, run_case_dev_container, RunConfig
 from report_generator import (
     compare_results, ComparisonResult,
     write_csv, write_json,
     print_comparison_table, generate_nfe_vs_walltime_data,
 )
+
+
+def _run_case(case_dir: Path, run_config: RunConfig, variant: str = "cpu") -> BenchmarkMetrics:
+    """Route to the appropriate runner based on config."""
+    if run_config.use_dev_container:
+        return run_case_dev_container(case_dir, run_config, variant=variant)
+    elif run_config.use_docker:
+        return run_case_docker(case_dir, run_config, variant=variant)
+    else:
+        return run_case_native(case_dir, run_config)
+
+
+def _build_run_config(args) -> RunConfig:
+    """Build RunConfig from parsed arguments, handling --dev flag."""
+    use_dev = getattr(args, 'dev', False)
+    return RunConfig(
+        use_docker=getattr(args, 'docker', False) and not use_dev,
+        docker_image=getattr(args, 'image', 'mixfoam:latest'),
+        gpu_runtime=True,
+        use_dev_container=use_dev,
+        dev_container_name=getattr(args, 'dev_container', 'ogl-dev'),
+        timeout=getattr(args, 'timeout', 600),
+        dry_run=getattr(args, 'dry_run', False),
+        verbose=getattr(args, 'verbose', False),
+    )
 
 
 def cmd_scan(args):
@@ -94,7 +119,9 @@ def cmd_run(args):
 
     print(f"\nWill benchmark {len(cases_to_run)} cases")
     print(f"Results directory: {results_dir}")
-    print(f"Mode: {'Docker' if args.docker else 'Native'}")
+    use_dev = getattr(args, 'dev', False)
+    mode = 'Dev container' if use_dev else ('Docker' if args.docker else 'Native')
+    print(f"Mode: {mode}")
     print(f"Timesteps per case: {args.timesteps}")
     print()
 
@@ -107,14 +134,7 @@ def cmd_run(args):
         debug_level=1 if args.verbose else 0,
     )
 
-    run_config = RunConfig(
-        use_docker=args.docker,
-        docker_image=args.image,
-        gpu_runtime=True,
-        timeout=args.timeout,
-        dry_run=args.dry_run,
-        verbose=args.verbose,
-    )
+    run_config = _build_run_config(args)
 
     # Run benchmarks
     all_results = []
@@ -210,19 +230,13 @@ def _run_single_case(
 
     # Run CPU
     print("  Running CPU baseline...")
-    if run_config.use_docker:
-        cpu_metrics = run_case_docker(cpu_case_dir, run_config, variant="cpu")
-    else:
-        cpu_metrics = run_case_native(cpu_case_dir, run_config)
+    cpu_metrics = _run_case(cpu_case_dir, run_config, variant="cpu")
     cpu_metrics.case_name = case.name
     cpu_metrics.variant = "cpu"
 
     # Run GPU
     print("  Running GPU (OGLPCG)...")
-    if run_config.use_docker:
-        gpu_metrics = run_case_docker(gpu_case_dir, run_config, variant="gpu")
-    else:
-        gpu_metrics = run_case_native(gpu_case_dir, run_config)
+    gpu_metrics = _run_case(gpu_case_dir, run_config, variant="gpu")
     gpu_metrics.case_name = case.name
     gpu_metrics.variant = "gpu"
 
@@ -425,15 +439,14 @@ def cmd_scaling(args):
         precision_policy=args.precision,
         iterative_refinement=args.precision != "FP64",
         debug_level=1 if args.verbose else 0,
+        preconditioner=args.preconditioner,
+        mg_smoother=args.mg_smoother,
+        mg_smoother_iters=args.mg_smoother_iters,
+        mg_cache_interval=args.mg_cache_interval,
+        mg_cache_max_iters=args.mg_cache_max_iters,
     )
 
-    run_config = RunConfig(
-        use_docker=args.docker,
-        docker_image=args.image,
-        gpu_runtime=True,
-        timeout=args.timeout,
-        verbose=args.verbose,
-    )
+    run_config = _build_run_config(args)
 
     cpu_variant = args.cpu_variant
 
@@ -509,19 +522,13 @@ def cmd_scaling(args):
 
         # Run CPU
         print(f"  Running CPU...")
-        if run_config.use_docker:
-            cpu_metrics = run_case_docker(cpu_dir, run_config, variant="cpu")
-        else:
-            cpu_metrics = run_case_native(cpu_dir, run_config)
+        cpu_metrics = _run_case(cpu_dir, run_config, variant="cpu")
         cpu_metrics.case_name = f"{case_label}_x{factor}"
         cpu_metrics.variant = "cpu"
 
         # Run GPU
         print(f"  Running GPU...")
-        if run_config.use_docker:
-            gpu_metrics = run_case_docker(gpu_dir, run_config, variant="gpu")
-        else:
-            gpu_metrics = run_case_native(gpu_dir, run_config)
+        gpu_metrics = _run_case(gpu_dir, run_config, variant="gpu")
         gpu_metrics.case_name = f"{case_label}_x{factor}"
         gpu_metrics.variant = "gpu"
 
@@ -614,15 +621,14 @@ def cmd_compare(args):
         precision_policy=args.precision,
         iterative_refinement=args.precision != "FP64",
         debug_level=1 if args.verbose else 0,
+        preconditioner=args.preconditioner,
+        mg_smoother=args.mg_smoother,
+        mg_smoother_iters=args.mg_smoother_iters,
+        mg_cache_interval=args.mg_cache_interval,
+        mg_cache_max_iters=args.mg_cache_max_iters,
     )
 
-    run_config = RunConfig(
-        use_docker=args.docker,
-        docker_image=args.image,
-        gpu_runtime=True,
-        timeout=args.timeout,
-        verbose=args.verbose,
-    )
+    run_config = _build_run_config(args)
 
     cpu_variant = args.cpu_variant
     case_label = case_path.name
@@ -642,19 +648,13 @@ def cmd_compare(args):
 
     # Run CPU
     print(f"Running CPU...")
-    if run_config.use_docker:
-        cpu_metrics = run_case_docker(cpu_dir, run_config, variant="cpu")
-    else:
-        cpu_metrics = run_case_native(cpu_dir, run_config)
+    cpu_metrics = _run_case(cpu_dir, run_config, variant="cpu")
     cpu_metrics.case_name = case_label
     cpu_metrics.variant = "cpu"
 
     # Run GPU
     print(f"Running GPU...")
-    if run_config.use_docker:
-        gpu_metrics = run_case_docker(gpu_dir, run_config, variant="gpu")
-    else:
-        gpu_metrics = run_case_native(gpu_dir, run_config)
+    gpu_metrics = _run_case(gpu_dir, run_config, variant="gpu")
     gpu_metrics.case_name = case_label
     gpu_metrics.variant = "gpu"
 
@@ -717,6 +717,10 @@ def main():
     run_parser.add_argument("--category", help="Run cases from specific category")
     run_parser.add_argument("--docker", action="store_true",
                             help="Run in Docker container")
+    run_parser.add_argument("--dev", action="store_true",
+                            help="Run in persistent dev container (./dev.sh start first)")
+    run_parser.add_argument("--dev-container", default="ogl-dev",
+                            help="Dev container name (default: ogl-dev)")
     run_parser.add_argument("--native", action="store_true",
                             help="Run natively (OpenFOAM must be sourced)")
     run_parser.add_argument("--image", default="mixfoam:latest",
@@ -764,6 +768,10 @@ def main():
                                    "(default: 1,2,4,8)")
     scale_parser.add_argument("--docker", action="store_true",
                               help="Run in Docker container")
+    scale_parser.add_argument("--dev", action="store_true",
+                              help="Run in persistent dev container (./dev.sh start first)")
+    scale_parser.add_argument("--dev-container", default="ogl-dev",
+                              help="Dev container name (default: ogl-dev)")
     scale_parser.add_argument("--native", action="store_true",
                               help="Run natively")
     scale_parser.add_argument("--image", default="mixfoam:latest",
@@ -778,6 +786,17 @@ def main():
     scale_parser.add_argument("--cpu-variant", default="cpu_pcg",
                               choices=["cpu", "cpu_pcg"],
                               help="CPU baseline variant (default: cpu_pcg)")
+    scale_parser.add_argument("--preconditioner", default="blockJacobi",
+                              help="GPU preconditioner (default: blockJacobi)")
+    scale_parser.add_argument("--mg-smoother", default="jacobi",
+                              choices=["jacobi", "chebyshev", "blockJacobi"],
+                              help="Multigrid smoother type (default: jacobi)")
+    scale_parser.add_argument("--mg-smoother-iters", type=int, default=2,
+                              help="Multigrid smoother iterations/degree (default: 2)")
+    scale_parser.add_argument("--mg-cache-interval", type=int, default=0,
+                              help="MG hierarchy cache interval (0=rebuild every call)")
+    scale_parser.add_argument("--mg-cache-max-iters", type=int, default=200,
+                              help="Force MG rebuild if iters exceed this (default: 200)")
     scale_parser.add_argument("--results-dir", default="./scaling_results",
                               help="Results output directory")
     scale_parser.add_argument("--verbose", "-v", action="store_true",
@@ -792,6 +811,10 @@ def main():
                                 help="Path to an OpenFOAM case directory")
     compare_parser.add_argument("--docker", action="store_true",
                                 help="Run in Docker container")
+    compare_parser.add_argument("--dev", action="store_true",
+                                help="Run in persistent dev container (./dev.sh start first)")
+    compare_parser.add_argument("--dev-container", default="ogl-dev",
+                                help="Dev container name (default: ogl-dev)")
     compare_parser.add_argument("--native", action="store_true",
                                 help="Run natively")
     compare_parser.add_argument("--image", default="mixfoam:latest",
@@ -806,6 +829,17 @@ def main():
     compare_parser.add_argument("--cpu-variant", default="cpu_pcg",
                                 choices=["cpu", "cpu_pcg"],
                                 help="CPU baseline variant (default: cpu_pcg)")
+    compare_parser.add_argument("--preconditioner", default="blockJacobi",
+                                help="GPU preconditioner (default: blockJacobi)")
+    compare_parser.add_argument("--mg-smoother", default="jacobi",
+                                choices=["jacobi", "chebyshev", "blockJacobi"],
+                                help="Multigrid smoother type (default: jacobi)")
+    compare_parser.add_argument("--mg-smoother-iters", type=int, default=2,
+                                help="Multigrid smoother iterations/degree (default: 2)")
+    compare_parser.add_argument("--mg-cache-interval", type=int, default=0,
+                                help="MG hierarchy cache interval (0=rebuild every call)")
+    compare_parser.add_argument("--mg-cache-max-iters", type=int, default=200,
+                                help="Force MG rebuild if iters exceed this (default: 200)")
     compare_parser.add_argument("--results-dir", default="./compare_results",
                                 help="Results output directory")
     compare_parser.add_argument("--verbose", "-v", action="store_true",
@@ -813,24 +847,26 @@ def main():
 
     args = parser.parse_args()
 
+    def _check_exec_mode(args):
+        dev = getattr(args, 'dev', False)
+        docker = getattr(args, 'docker', False)
+        native = getattr(args, 'native', False)
+        if not dev and not docker and not native:
+            print("Error: specify --docker, --dev, or --native execution mode")
+            sys.exit(1)
+
     if args.command == "scan":
         cmd_scan(args)
     elif args.command == "run":
-        if not args.docker and not args.native:
-            print("Error: specify --docker or --native execution mode")
-            sys.exit(1)
+        _check_exec_mode(args)
         cmd_run(args)
     elif args.command == "report":
         cmd_report(args)
     elif args.command == "scaling":
-        if not args.docker and not args.native:
-            print("Error: specify --docker or --native execution mode")
-            sys.exit(1)
+        _check_exec_mode(args)
         cmd_scaling(args)
     elif args.command == "compare":
-        if not args.docker and not args.native:
-            print("Error: specify --docker or --native execution mode")
-            sys.exit(1)
+        _check_exec_mode(args)
         cmd_compare(args)
     else:
         parser.print_help()

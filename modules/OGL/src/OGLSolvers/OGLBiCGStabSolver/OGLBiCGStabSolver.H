@@ -22,48 +22,48 @@ License
     along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
 
 Class
-    Foam::OGL::OGLPCGSolver
+    Foam::OGL::OGLBiCGStabSolver
 
 Description
-    GPU-accelerated Preconditioned Conjugate Gradient solver for symmetric
-    lduMatrices using Ginkgo.
+    GPU-accelerated BiCGStab solver for asymmetric lduMatrices using Ginkgo.
+
+    Designed for momentum equations (U, k, epsilon) which produce asymmetric
+    matrices due to advection terms. Uses gko::solver::Bicgstab with
+    Block Jacobi or composite preconditioners.
 
     Features:
     - Mixed precision (FP32 solve with FP64 iterative refinement)
     - Correct interface handling via FoamGinkgoLinOp
-    - Structure/value caching for performance
+    - Operator structure caching for performance
     - Multi-GPU ready via MPI rank-to-device mapping
 
     Configuration example:
     \verbatim
     solvers
     {
-        p
+        U
         {
-            solver          OGLPCG;
+            solver          OGLBiCGStab;
             tolerance       1e-6;
-            relTol          0.01;
+            relTol          0.1;
 
             OGLCoeffs
             {
-                precisionPolicy     FP32;
-                iterativeRefinement on;
-                maxRefineIters      3;
-                innerTolerance      1e-4;
-                cacheStructure      true;
-                cacheValues         false;
+                precisionPolicy     FP64;
+                preconditioner      blockJacobi;
+                blockSize           4;
             }
         }
     }
     \endverbatim
 
 SourceFiles
-    OGLPCGSolver.C
+    OGLBiCGStabSolver.C
 
 \*---------------------------------------------------------------------------*/
 
-#ifndef OGLPCGSolver_H
-#define OGLPCGSolver_H
+#ifndef OGLBiCGStabSolver_H
+#define OGLBiCGStabSolver_H
 
 #include "OGLSolverBase.H"
 #include "FoamGinkgoLinOp.H"
@@ -80,10 +80,10 @@ namespace OGL
 {
 
 /*---------------------------------------------------------------------------*\
-                        Class OGLPCGSolver Declaration
+                    Class OGLBiCGStabSolver Declaration
 \*---------------------------------------------------------------------------*/
 
-class OGLPCGSolver
+class OGLBiCGStabSolver
 :
     public OGLSolverBase
 {
@@ -94,8 +94,6 @@ class OGLPCGSolver
         {
             std::shared_ptr<FoamGinkgoLinOp<float>> opF32;
             std::shared_ptr<FoamGinkgoLinOp<double>> opF64;
-            std::shared_ptr<gko::LinOp> solverF32;
-            std::shared_ptr<gko::LinOp> solverF64;
         };
 
 
@@ -108,12 +106,6 @@ class OGLPCGSolver
         //- Mutex for cache access
         static std::mutex cacheMutex_;
 
-        //- MG hierarchy call counter per field (for cache interval)
-        static std::map<word, label> mgCallCount_;
-
-        //- Last MG iteration count per field (for convergence gating)
-        static std::map<word, label> mgLastIters_;
-
 
     // Private Data
 
@@ -123,10 +115,10 @@ class OGLPCGSolver
         //- Cached FP64 operator
         mutable std::shared_ptr<FoamGinkgoLinOp<double>> operatorF64_;
 
-        //- Cached FP32 solver (LinOp to support both CG and GMRES)
+        //- FP32 solver (rebuilt each call — momentum matrix changes frequently)
         mutable std::shared_ptr<gko::LinOp> solverF32_;
 
-        //- Cached FP64 solver
+        //- FP64 solver
         mutable std::shared_ptr<gko::LinOp> solverF64_;
 
 
@@ -151,12 +143,6 @@ class OGLPCGSolver
             std::shared_ptr<gko::LinOp>& solver,
             ValueType tolerance
         ) const;
-
-        //- Create/update FP32 operator and solver
-        void updateSolverF32() const;
-
-        //- Create/update FP64 operator and solver
-        void updateSolverF64() const;
 
 
 protected:
@@ -183,13 +169,13 @@ protected:
 public:
 
     //- Runtime type information
-    TypeName("OGLPCG");
+    TypeName("OGLBiCGStab");
 
 
     // Constructors
 
         //- Construct from matrix components and solver controls
-        OGLPCGSolver
+        OGLBiCGStabSolver
         (
             const word& fieldName,
             const lduMatrix& matrix,
@@ -200,17 +186,17 @@ public:
         );
 
         //- Disallow default bitwise copy construction
-        OGLPCGSolver(const OGLPCGSolver&) = delete;
+        OGLBiCGStabSolver(const OGLBiCGStabSolver&) = delete;
 
 
     //- Destructor
-    virtual ~OGLPCGSolver() = default;
+    virtual ~OGLBiCGStabSolver() = default;
 
 
     // Member Operators
 
         //- Disallow default bitwise assignment
-        void operator=(const OGLPCGSolver&) = delete;
+        void operator=(const OGLBiCGStabSolver&) = delete;
 };
 
 

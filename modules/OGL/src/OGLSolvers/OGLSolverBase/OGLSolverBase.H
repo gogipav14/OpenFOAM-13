@@ -91,7 +91,9 @@ public:
             BJ_ISAI_GMRES,       // Multiplicative: ISAI * BJ (GMRES)
             BJ_ISAI_INNER_OUTER, // FGMRES outer + CG-BJ inner precond
             FFT,                 // FFT Laplacian preconditioner (structured)
-            FFT_BLOCK_JACOBI     // FFT + Block Jacobi additive (structured)
+            FFT_BLOCK_JACOBI,    // FFT + Block Jacobi additive (structured)
+            MULTIGRID,           // AMG via Ginkgo Multigrid (PGM coarsening)
+            ILU                  // Parallel incomplete LU (asymmetric)
         };
 
 
@@ -146,6 +148,28 @@ protected:
 
         //- Mesh spacing for FFT preconditioner (dx, dy, dz)
         Vector<scalar> meshSpacing_;
+
+        //- Multigrid: max hierarchy levels
+        label mgMaxLevels_;
+
+        //- Multigrid: minimum rows on coarsest level
+        label mgMinCoarseRows_;
+
+        //- Multigrid: smoother iterations per level
+        label mgSmootherIters_;
+
+        //- Multigrid: smoother relaxation factor
+        scalar mgSmootherRelax_;
+
+        //- Multigrid: smoother type ("jacobi", "chebyshev", "blockJacobi")
+        word mgSmoother_;
+
+        //- Multigrid: hierarchy cache interval (0=rebuild every call,
+        //  N>0=rebuild every N calls, reuse stale hierarchy in between)
+        label mgCacheInterval_;
+
+        //- Multigrid: max iterations before forced hierarchy rebuild
+        label mgCacheMaxIters_;
 
 
     // Protected Member Functions
