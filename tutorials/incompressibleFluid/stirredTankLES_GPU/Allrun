@@ -1,0 +1,54 @@
+#!/bin/sh
+cd "${0%/*}" || exit                                # Run from this directory
+. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions        # Tutorial run functions
+
+#------------------------------------------------------------------------------
+# Stirred Tank LES with GPU-Accelerated Pressure Solver
+#
+# This tutorial demonstrates:
+# - GPU-accelerated pressure solve using OGL (OpenFOAM Ginkgo Layer)
+# - Mixed precision (FP32 solve + FP64 residual correction)
+# - Non-conformal cyclic (NCC) interfaces for rotating impeller
+# - WALE LES turbulence model
+# - Passive scalar transport for mixing time measurement
+#
+# Requirements:
+# - OGL library built with Ginkgo (CUDA/HIP backend)
+# - export GINKGO_ROOT=/path/to/ginkgo
+#
+# Multi-GPU execution:
+# - Set numberOfSubdomains in decomposeParDict to match GPU count
+# - Use: mpirun -np 4 foamRun -parallel
+# - GPU binding: each MPI rank auto-binds to local GPU
+#------------------------------------------------------------------------------
+
+# Ensure OGL library is available
+if [ ! -f "$FOAM_USER_LIBBIN/libOGL.so" ]; then
+    echo "Warning: libOGL.so not found in $FOAM_USER_LIBBIN"
+    echo "Build OGL module first: cd modules/OGL && ./Allwmake"
+fi
+
+# Generate mesh
+runApplication blockMesh
+
+# Create cell zones for impeller
+runApplication topoSet -dict system/topoSetDict 2>/dev/null || true
+
+# Create non-conformal cyclic interfaces
+runApplication createNonConformalCouples
+
+# Initialize tracer field (dye blob at top)
+runApplication setFields
+
+# Run serial (single GPU)
+echo "Running serial (single GPU)..."
+runApplication $(getApplication)
+
+# Alternative: Run parallel (multi-GPU)
+# Uncomment below for multi-GPU execution
+#
+# runApplication decomposePar
+# runParallel $(getApplication)
+# runApplication reconstructPar
+
+#------------------------------------------------------------------------------

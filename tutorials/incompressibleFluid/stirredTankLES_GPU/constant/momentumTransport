@@ -1,0 +1,42 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      momentumTransport;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+simulationType  LES;
+
+LES
+{
+    // WALE (Wall-Adapting Local Eddy-viscosity) model
+    // Better near-wall behavior than Smagorinsky
+    model           WALE;
+
+    WALECoeffs
+    {
+        Ck          0.094;
+        Cw          0.325;
+    }
+
+    turbulence      on;
+    printCoeffs     on;
+
+    // Filter width specification
+    delta           cubeRootVol;
+
+    cubeRootVolCoeffs
+    {
+        deltaCoeff  1;
+    }
+}
+
+// ************************************************************************* //

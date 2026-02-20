@@ -1,0 +1,19 @@
+OGLExecutor/OGLExecutor.C
+
+OGLMatrix/lduToCSR.C
+
+OGLOperator/FoamGinkgoLinOp.C
+OGLOperator/GPUHaloExchange.C
+
+OGLMixedPrecision/FP32CastWrapper.C
+OGLMixedPrecision/AdaptivePrecision.C
+
+OGLUtils/PerformanceTimer.C
+OGLUtils/GinkgoMemoryPool.C
+
+OGLSolvers/OGLSolverBase/OGLSolverBase.C
+OGLSolvers/OGLPCGSolver/OGLPCGSolver.C
+OGLSolvers/OGLBatchedSolver/OGLBatchedSolver.C
+OGLSolvers/OGLBiCGStabSolver/OGLBiCGStabSolver.C
+
+LIB = $(FOAM_USER_LIBBIN)/libOGL

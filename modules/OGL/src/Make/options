@@ -1,0 +1,33 @@
+GINKGO_DIR = $(GINKGO_ROOT)
+CUDA_DIR = /usr/local/cuda
+
+EXE_INC = \
+    -std=c++17 \
+    -I$(LIB_SRC)/OpenFOAM/lnInclude \
+    -I$(LIB_SRC)/finiteVolume/lnInclude \
+    -I$(LIB_SRC)/meshTools/lnInclude \
+    -I$(LIB_SRC)/../src/Pstream/mpi/lnInclude \
+    -I$(MPI_ARCH_PATH)/include \
+    -I$(GINKGO_DIR)/include \
+    -I$(CUDA_DIR)/include \
+    -IOGLExecutor \
+    -IOGLMatrix \
+    -IOGLOperator \
+    -IOGLMixedPrecision \
+    -IOGLUtils \
+    -IOGLSolvers/OGLSolverBase \
+    -IOGLSolvers/OGLPCGSolver \
+    -IOGLSolvers/OGLBatchedSolver \
+    -IOGLSolvers/OGLBiCGStabSolver
+
+LIB_LIBS = \
+    -lOpenFOAM \
+    -lfiniteVolume \
+    -lmeshTools \
+    -L$(GINKGO_DIR)/lib \
+    -lginkgo \
+    -Wl,-rpath,$(GINKGO_DIR)/lib \
+    -L$(GINKGO_DIR)/lib -lfftprecond -lhalokernel \
+    -Wl,-rpath,$(GINKGO_DIR)/lib \
+    -L$(CUDA_DIR)/lib64 -lcufft -lcudart \
+    -Wl,-rpath,$(CUDA_DIR)/lib64

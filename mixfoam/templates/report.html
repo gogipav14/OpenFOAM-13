@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+
+    {# --- Plotly.js: embedded offline bundle or CDN fallback --- #}
+    {% if plotly_js %}
+    <script>{{ plotly_js }}</script>
+    {% else %}
+    {{ plotly_cdn_fallback }}
+    {% endif %}
+
+    <style>
+        /* ===================================================================
+           CSS Variables
+           =================================================================== */
+        :root {
+            --bg:          #111111;
+            --card-bg:     #1e1e1e;
+            --border:      #333333;
+            --text:        #dddddd;
+            --text-muted:  #888888;
+            --accent:      #00b4d8;
+            --accent-dark: #0077b6;
+            --gold:        #ffd60a;
+            --success:     #06d6a0;
+            --warning:     #ef476f;
+            --sidebar-w:   240px;
+            --radius:      10px;
+        }
+
+        /* ===================================================================
+           Reset & Base
+           =================================================================== */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html {
+            scroll-behavior: smooth;
+            font-size: 15px;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        /* ===================================================================
+           Sidebar Navigation
+           =================================================================== */
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: var(--sidebar-w);
+            height: 100vh;
+            background: #0a0a0a;
+            border-right: 1px solid var(--border);
+            padding: 24px 16px;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+
+        .sidebar-logo {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--accent);
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .sidebar-subtitle {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 28px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sidebar nav a {
+            display: block;
+            padding: 8px 12px;
+            margin-bottom: 2px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            transition: all 0.15s ease;
+        }
+
+        .sidebar nav a:hover,
+        .sidebar nav a.active {
+            background: rgba(0, 180, 216, 0.1);
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .sidebar nav a::before {
+            content: attr(data-icon);
+            display: inline-block;
+            width: 22px;
+            text-align: center;
+            margin-right: 6px;
+        }
+
+        /* ===================================================================
+           Main Content
+           =================================================================== */
+        .main {
+            margin-left: var(--sidebar-w);
+            padding: 32px 40px 80px;
+            max-width: 1200px;
+        }
+
+        /* ===================================================================
+           Header
+           =================================================================== */
+        .report-header {
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .report-header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 4px;
+        }
+
+        .report-header h1 span {
+            color: var(--accent);
+        }
+
+        .report-header .meta {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        /* ===================================================================
+           Cards
+           =================================================================== */
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px;
+            margin-bottom: 28px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--accent);
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        /* ===================================================================
+           Metric Grid (Dashboard Cards)
+           =================================================================== */
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 8px;
+        }
+
+        .metric-card {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 180, 216, 0.15);
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--gold);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .metric-value.na {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+
+        .metric-unit {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        /* ===================================================================
+           Tables
+           =================================================================== */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .data-table th,
+        .data-table td {
+            padding: 10px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .data-table th {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .data-table td {
+            font-size: 0.95rem;
+        }
+
+        .data-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* ===================================================================
+           Plot Containers
+           =================================================================== */
+        .plot-container {
+            width: 100%;
+            min-height: 100px;
+            margin: 12px 0;
+        }
+
+        .plot-container .js-plotly-plot,
+        .plot-container .plotly-graph-div {
+            width: 100% !important;
+        }
+
+        .plot-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .plot-error {
+            padding: 20px;
+            text-align: center;
+            color: var(--warning);
+            font-style: italic;
+            border: 1px dashed var(--border);
+            border-radius: 6px;
+        }
+
+        .no-data {
+            padding: 40px 20px;
+            text-align: center;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* ===================================================================
+           Case Info (preformatted)
+           =================================================================== */
+        .case-info-pre {
+            background: #0d0d0d;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 16px 20px;
+            font-family: "SFMono-Regular", "Cascadia Code", "Fira Code", monospace;
+            font-size: 0.8rem;
+            line-height: 1.7;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            color: var(--text-muted);
+        }
+
+        /* ===================================================================
+           Footer
+           =================================================================== */
+        .report-footer {
+            margin-top: 48px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .report-footer strong {
+            color: var(--accent);
+        }
+
+        /* ===================================================================
+           Mobile Responsive
+           =================================================================== */
+        @media (max-width: 900px) {
+            .sidebar {
+                position: static;
+                width: 100%;
+                height: auto;
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+                padding: 16px;
+            }
+
+            .sidebar nav {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+
+            .sidebar nav a {
+                font-size: 0.75rem;
+                padding: 6px 10px;
+            }
+
+            .main {
+                margin-left: 0;
+                padding: 20px 16px 60px;
+            }
+
+            .report-header h1 {
+                font-size: 1.4rem;
+            }
+
+            .metric-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .plot-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 500px) {
+            .metric-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ===================================================================
+           Print Styles
+           =================================================================== */
+        @media print {
+            :root {
+                --bg: #ffffff;
+                --card-bg: #ffffff;
+                --border: #cccccc;
+                --text: #222222;
+                --text-muted: #666666;
+            }
+
+            body {
+                background: #ffffff;
+                color: #222222;
+                font-size: 11pt;
+            }
+
+            .sidebar {
+                display: none !important;
+            }
+
+            .main {
+                margin-left: 0;
+                padding: 0;
+                max-width: 100%;
+            }
+
+            .card {
+                box-shadow: none;
+                border: 1px solid #cccccc;
+                break-inside: avoid;
+                page-break-inside: avoid;
+                margin-bottom: 16px;
+                padding: 16px;
+            }
+
+            .metric-card {
+                background: #f5f5f5 !important;
+                border: 1px solid #cccccc;
+            }
+
+            .metric-value {
+                color: #222222;
+            }
+
+            .card-title {
+                color: #0077b6;
+            }
+
+            .report-header h1 span {
+                color: #0077b6;
+            }
+
+            .plot-container {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+
+            a { color: #0077b6; }
+            a[href]::after { content: none; }
+        }
+
+        /* ===================================================================
+           Section anchors (offset for sidebar)
+           =================================================================== */
+        .section-anchor {
+            scroll-margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ================================================================
+         SIDEBAR NAVIGATION
+         ================================================================ -->
+    <aside class="sidebar">
+        <div class="sidebar-logo">MixFOAM</div>
+        <div class="sidebar-subtitle">{{ reactor_name }}{% if config_name %} / {{ config_name }}{% endif %}</div>
+        <nav>
+            <a href="#operating"     data-icon="&#9881;">Operating Conditions</a>
+            <a href="#results"       data-icon="&#9733;">Summary Results</a>
+            <a href="#velocity"      data-icon="&#10148;">Velocity Field</a>
+            <a href="#tracer"        data-icon="&#9670;">Tracer / Mixing</a>
+            <a href="#shear"         data-icon="&#9876;">Shear Rate</a>
+            <a href="#timeseries"    data-icon="&#9670;">Time Series</a>
+            <a href="#probes"        data-icon="&#9678;">Probe Data</a>
+            <a href="#details"       data-icon="&#9776;">Simulation Details</a>
+        </nav>
+    </aside>
+
+    <!-- ================================================================
+         MAIN CONTENT
+         ================================================================ -->
+    <div class="main">
+
+        <!-- HEADER -->
+        <header class="report-header">
+            <h1><span>MixFOAM</span> Simulation Report</h1>
+            <div class="meta">
+                {{ reactor_name }}{% if config_name %} &mdash; {{ config_name }}{% endif %}
+                &nbsp;|&nbsp; Generated {{ generation_time }}
+            </div>
+        </header>
+
+        <!-- ============================================================
+             SECTION: Operating Conditions
+             ============================================================ -->
+        <section id="operating" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Operating Conditions</div>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Fill Volume</td>
+                            <td>{% if operating_conditions.volume_L is not none %}{{ "%.1f"|format(operating_conditions.volume_L) }} L{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td>Impeller Speed</td>
+                            <td>{% if operating_conditions.rpm is not none %}{{ "%.0f"|format(operating_conditions.rpm) }} RPM{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td>Fluid Density</td>
+                            <td>{% if operating_conditions.density is not none %}{{ "%.1f"|format(operating_conditions.density) }} kg/m&sup3;{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td>Dynamic Viscosity</td>
+                            <td>{% if operating_conditions.viscosity is not none %}{{ "%.2e"|format(operating_conditions.viscosity) }} Pa&middot;s{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td>Kinematic Viscosity</td>
+                            <td>{% if operating_conditions.nu is not none %}{{ "%.2e"|format(operating_conditions.nu) }} m&sup2;/s{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td>Tip Speed</td>
+                            <td>{% if operating_conditions.tip_speed is not none %}{{ "%.2f"|format(operating_conditions.tip_speed) }} m/s{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td>Impeller Reynolds Number</td>
+                            <td>{% if operating_conditions.Re is not none %}{{ "%.0f"|format(operating_conditions.Re) }}{% else %}N/A{% endif %}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Summary Results (Metric Dashboard)
+             ============================================================ -->
+        <section id="results" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Summary Results</div>
+                <div class="metric-grid">
+                    <!-- EDR -->
+                    <div class="metric-card">
+                        <div class="metric-label">Energy Dissipation Rate</div>
+                        <div class="metric-value{% if results.edr is none %} na{% endif %}">
+                            {% if results.edr is not none %}{{ "%.4g"|format(results.edr) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">m&sup2;/s&sup3;</div>
+                    </div>
+                    <!-- P/V -->
+                    <div class="metric-card">
+                        <div class="metric-label">Power per Volume</div>
+                        <div class="metric-value{% if results.p_v is none %} na{% endif %}">
+                            {% if results.p_v is not none %}{{ "%.4g"|format(results.p_v) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">W/m&sup3;</div>
+                    </div>
+                    <!-- Power Number -->
+                    <div class="metric-card">
+                        <div class="metric-label">Power Number (Np)</div>
+                        <div class="metric-value{% if results.power_number is none %} na{% endif %}">
+                            {% if results.power_number is not none %}{{ "%.3f"|format(results.power_number) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">dimensionless</div>
+                    </div>
+                    <!-- CoV -->
+                    <div class="metric-card">
+                        <div class="metric-label">Homogeneity (CoV)</div>
+                        <div class="metric-value{% if results.cov is none %} na{% endif %}">
+                            {% if results.cov is not none %}{{ "%.4f"|format(results.cov) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">lower is better</div>
+                    </div>
+                    <!-- Max Shear -->
+                    <div class="metric-card">
+                        <div class="metric-label">Max Shear Rate</div>
+                        <div class="metric-value{% if results.max_shear is none %} na{% endif %}">
+                            {% if results.max_shear is not none %}{{ "%.1f"|format(results.max_shear) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">1/s</div>
+                    </div>
+                    <!-- Avg Shear -->
+                    <div class="metric-card">
+                        <div class="metric-label">Bulk Avg Shear Rate</div>
+                        <div class="metric-value{% if results.avg_shear is none %} na{% endif %}">
+                            {% if results.avg_shear is not none %}{{ "%.2f"|format(results.avg_shear) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">1/s</div>
+                    </div>
+                    <!-- TKE -->
+                    <div class="metric-card">
+                        <div class="metric-label">Turbulent Kinetic Energy</div>
+                        <div class="metric-value{% if results.tke is none %} na{% endif %}">
+                            {% if results.tke is not none %}{{ "%.4g"|format(results.tke) }}{% else %}N/A{% endif %}
+                        </div>
+                        <div class="metric-unit">m&sup2;/s&sup2;</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Velocity Field
+             ============================================================ -->
+        <section id="velocity" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Velocity Field</div>
+                {% if velocity_h_plot or velocity_v_plot %}
+                <div class="plot-row">
+                    <div>
+                        <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px;">Horizontal Slice</h4>
+                        <div class="plot-container">
+                            {% if velocity_h_plot %}
+                                {{ velocity_h_plot | safe }}
+                            {% else %}
+                                <div class="no-data">No horizontal slice data available.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px;">Vertical Slice</h4>
+                        <div class="plot-container">
+                            {% if velocity_v_plot %}
+                                {{ velocity_v_plot | safe }}
+                            {% else %}
+                                <div class="no-data">No vertical slice data available.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="no-data">No velocity slice data available. Ensure postProcessing/horizontalSlice and postProcessing/verticalSlice contain VTK outputs.</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Tracer / Mixing
+             ============================================================ -->
+        <section id="tracer" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Tracer / Mixing Evolution</div>
+                {% if tracer_animation %}
+                <div class="plot-container">
+                    {{ tracer_animation | safe }}
+                </div>
+                {% else %}
+                <div class="no-data">No tracer animation data available. The tracer field may not have been written, or VTK slice output is missing.</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Shear Rate Distribution
+             ============================================================ -->
+        <section id="shear" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Shear Rate Distribution</div>
+                {% if histogram_plot or shear_rate_plot %}
+                <div class="plot-row">
+                    <div>
+                        <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px;">Strain Rate Histogram</h4>
+                        <div class="plot-container">
+                            {% if histogram_plot %}
+                                {{ histogram_plot | safe }}
+                            {% else %}
+                                <div class="no-data">No histogram data available.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px;">Shear Rate Field</h4>
+                        <div class="plot-container">
+                            {% if shear_rate_plot %}
+                                {{ shear_rate_plot | safe }}
+                            {% else %}
+                                <div class="no-data">No shear rate field data available.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="no-data">No shear rate data available.</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Time Series
+             ============================================================ -->
+        <section id="timeseries" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Time Series &amp; Convergence</div>
+
+                {% if cov_plot %}
+                <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px; margin-top: 4px;">Coefficient of Variation vs Time</h4>
+                <div class="plot-container">
+                    {{ cov_plot | safe }}
+                </div>
+                {% endif %}
+
+                {% if torque_plot %}
+                <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px; margin-top: 20px;">Torque vs Time</h4>
+                <div class="plot-container">
+                    {{ torque_plot | safe }}
+                </div>
+                {% endif %}
+
+                {% if shear_history_plot %}
+                <h4 style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px; margin-top: 20px;">Shear Rate vs Time</h4>
+                <div class="plot-container">
+                    {{ shear_history_plot | safe }}
+                </div>
+                {% endif %}
+
+                {% if not cov_plot and not torque_plot and not shear_history_plot %}
+                <div class="no-data">No time series data available. Ensure function objects (mixingCoV, impellerForces, maxShearRate) are configured.</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Probe Data
+             ============================================================ -->
+        <section id="probes" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Probe Data &mdash; Tracer at TMB Locations</div>
+                {% if probe_plot %}
+                <div class="plot-container">
+                    {{ probe_plot | safe }}
+                </div>
+                {% else %}
+                <div class="no-data">No probe data available. Ensure tracerProbes function object is configured.</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- ============================================================
+             SECTION: Simulation Details
+             ============================================================ -->
+        <section id="details" class="section-anchor">
+            <div class="card">
+                <div class="card-title">Simulation Details</div>
+                <table class="data-table">
+                    <tbody>
+                        <tr>
+                            <td style="color: var(--text-muted); width: 200px;">Tank</td>
+                            <td>{{ tank_desc }}</td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-muted);">Impeller</td>
+                            <td>{{ impeller_desc }}</td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-muted);">Estimated Cell Count</td>
+                            <td>{% if estimated_cells is not none %}~{{ "{:,}".format(estimated_cells) }}{% else %}N/A{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-muted);">Turbulence Model</td>
+                            <td>{{ turbulence }}</td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-muted);">GPU Solver</td>
+                            <td>{{ gpu }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                {% if case_info_text %}
+                <h4 style="color: var(--text-muted); font-size: 0.85rem; margin: 20px 0 8px;">Raw Case Information</h4>
+                <pre class="case-info-pre">{{ case_info_text }}</pre>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- ============================================================
+             FOOTER
+             ============================================================ -->
+        <footer class="report-footer">
+            <p>Generated by <strong>MixFOAM</strong> &mdash; {{ generation_time }}</p>
+            <p style="margin-top: 4px;">OpenFOAM mixing simulation post-processing toolkit</p>
+        </footer>
+
+    </div><!-- /.main -->
+
+    <!-- ================================================================
+         Sidebar active-link highlighting on scroll
+         ================================================================ -->
+    <script>
+    (function() {
+        var sections = document.querySelectorAll('.section-anchor');
+        var navLinks = document.querySelectorAll('.sidebar nav a');
+
+        function onScroll() {
+            var scrollPos = window.scrollY + 80;
+            var current = '';
+            sections.forEach(function(section) {
+                if (section.offsetTop <= scrollPos) {
+                    current = section.getAttribute('id');
+                }
+            });
+            navLinks.forEach(function(link) {
+                link.classList.remove('active');
+                if (link.getAttribute('href') === '#' + current) {
+                    link.classList.add('active');
+                }
+            });
+        }
+
+        window.addEventListener('scroll', onScroll, { passive: true });
+        onScroll();
+
+        // Resize plotly charts to fit their containers
+        window.addEventListener('resize', function() {
+            if (typeof Plotly !== 'undefined') {
+                var plots = document.querySelectorAll('.js-plotly-plot');
+                plots.forEach(function(plot) {
+                    Plotly.Plots.resize(plot);
+                });
+            }
+        });
+
+        // Initial resize after load
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                if (typeof Plotly !== 'undefined') {
+                    var plots = document.querySelectorAll('.js-plotly-plot');
+                    plots.forEach(function(plot) {
+                        Plotly.Plots.resize(plot);
+                    });
+                }
+            }, 200);
+        });
+    })();
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,15 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+platforms/
+build/
+*.tar.gz
+*.log
+log.*
+benchmarks/preconditioner_results*
+benchmarks/scaling_results*
+papers/
+Dockerfile
+.dockerignore

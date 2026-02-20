@@ -1,0 +1,443 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Copyright (C) 2025 OpenFOAM Foundation
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+License
+    This file is part of OpenFOAM.
+
+    OpenFOAM is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    OpenFOAM is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
+
+\*---------------------------------------------------------------------------*/
+
+#include "lduToCSR.H"
+#include "lduAddressing.H"
+#include "OGLExecutor.H"
+#include "HaloKernels.h"
+
+#include <algorithm>
+#include <numeric>
+#include <limits>
+
+// * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
+
+void Foam::OGL::lduToCSR::buildStructure()
+{
+    const lduAddressing& addr = matrixPtr_->lduAddr();
+    const labelUList& upperAddr = addr.upperAddr();
+    const labelUList& lowerAddr = addr.lowerAddr();
+
+    nRows_ = matrixPtr_->diag().size();
+    const label nFaces = upperAddr.size();
+
+    // Check for int32 overflow (Ginkgo uses int for indices)
+    // Max non-zeros = nRows (diagonal) + 2*nFaces (upper + lower)
+    const label maxNonZeros = nRows_ + 2*nFaces;
+    if (nRows_ > std::numeric_limits<int>::max() ||
+        maxNonZeros > std::numeric_limits<int>::max())
+    {
+        FatalErrorInFunction
+            << "Matrix too large for Ginkgo int32 indexing: "
+            << "nRows = " << nRows_ << ", max nnz = " << maxNonZeros
+            << abort(FatalError);
+    }
+
+    // Count non-zeros per row:
+    // Each row has: 1 diagonal + number of off-diagonals
+    // Off-diagonals come from both upper (where this row is lowerAddr)
+    // and lower (where this row is upperAddr)
+
+    labelList rowCounts(nRows_, 1);  // Start with diagonal
+
+    forAll(upperAddr, facei)
+    {
+        // Upper coefficient: row = lowerAddr[facei], col = upperAddr[facei]
+        rowCounts[lowerAddr[facei]]++;
+
+        // Lower coefficient: row = upperAddr[facei], col = lowerAddr[facei]
+        rowCounts[upperAddr[facei]]++;
+    }
+
+    // Build row pointers
+    rowPointers_.resize(nRows_ + 1);
+    rowPointers_[0] = 0;
+    for (label i = 0; i < nRows_; i++)
+    {
+        rowPointers_[i + 1] = rowPointers_[i] + rowCounts[i];
+    }
+
+    nNonZeros_ = rowPointers_[nRows_];
+    colIndices_.resize(nNonZeros_);
+    valuesF64_.resize(nNonZeros_);
+    valuesF32_.resize(nNonZeros_);
+
+    // Initialize mapping arrays
+    diagToCsr_.setSize(nRows_);
+    upperToCsr_.setSize(nFaces);
+    lowerToCsr_.setSize(nFaces);
+
+    // Temporary array to track current position in each row
+    labelList currentPos(nRows_, 0);
+
+    // Structure to hold (column, csrPosition) pairs for sorting
+    struct ColPos
+    {
+        int col;
+        label csrPos;
+        label lduPos;  // Position in LDU array (-1 for diagonal)
+        int type;      // 0=diag, 1=upper, 2=lower
+    };
+
+    // For each row, collect all entries and sort by column
+    List<List<ColPos>> rowEntries(nRows_);
+
+    // Reserve space for entries
+    for (label row = 0; row < nRows_; row++)
+    {
+        rowEntries[row].setSize(rowCounts[row]);
+        currentPos[row] = 0;
+    }
+
+    // Add diagonal entries
+    for (label row = 0; row < nRows_; row++)
+    {
+        ColPos& entry = rowEntries[row][currentPos[row]++];
+        entry.col = row;
+        entry.lduPos = row;
+        entry.type = 0;  // diagonal
+    }
+
+    // Add upper entries (row = lowerAddr, col = upperAddr)
+    forAll(upperAddr, facei)
+    {
+        label row = lowerAddr[facei];
+        ColPos& entry = rowEntries[row][currentPos[row]++];
+        entry.col = upperAddr[facei];
+        entry.lduPos = facei;
+        entry.type = 1;  // upper
+    }
+
+    // Add lower entries (row = upperAddr, col = lowerAddr)
+    forAll(lowerAddr, facei)
+    {
+        label row = upperAddr[facei];
+        ColPos& entry = rowEntries[row][currentPos[row]++];
+        entry.col = lowerAddr[facei];
+        entry.lduPos = facei;
+        entry.type = 2;  // lower
+    }
+
+    // Sort each row by column index and fill colIndices and mappings
+    label csrPos = 0;
+    for (label row = 0; row < nRows_; row++)
+    {
+        List<ColPos>& entries = rowEntries[row];
+
+        // Sort by column index
+        std::sort
+        (
+            entries.begin(),
+            entries.end(),
+            [](const ColPos& a, const ColPos& b) { return a.col < b.col; }
+        );
+
+        // Fill column indices and build mappings
+        forAll(entries, i)
+        {
+            const ColPos& entry = entries[i];
+            colIndices_[csrPos] = entry.col;
+
+            // Record mapping from LDU to CSR
+            switch (entry.type)
+            {
+                case 0:  // diagonal
+                    diagToCsr_[entry.lduPos] = csrPos;
+                    break;
+                case 1:  // upper
+                    upperToCsr_[entry.lduPos] = csrPos;
+                    break;
+                case 2:  // lower
+                    lowerToCsr_[entry.lduPos] = csrPos;
+                    break;
+            }
+
+            csrPos++;
+        }
+    }
+
+    structureBuilt_ = true;
+}
+
+
+// * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
+
+Foam::OGL::lduToCSR::lduToCSR(const lduMatrix& matrix)
+:
+    matrixPtr_(&matrix),
+    nRows_(0),
+    nNonZeros_(0),
+    structureBuilt_(false),
+    lambdaMax_(0.0)
+{
+    buildStructure();
+    updateValues();
+}
+
+
+// * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
+
+void Foam::OGL::lduToCSR::rebuildStructure()
+{
+    structureBuilt_ = false;
+    buildStructure();
+    updateValues();
+}
+
+
+void Foam::OGL::lduToCSR::updateValues()
+{
+    if (!structureBuilt_)
+    {
+        buildStructure();
+    }
+
+    if (!matrixPtr_->hasDiag())
+    {
+        FatalErrorInFunction
+            << "lduMatrix diagonal not allocated. "
+            << "Cannot update CSR values from incomplete matrix."
+            << abort(FatalError);
+    }
+
+    const scalarField& diag = matrixPtr_->diag();
+    const scalarField& upper = matrixPtr_->upper();
+
+    // Lower is same as upper for symmetric matrices, or separate for asymmetric
+    const scalarField& lower = matrixPtr_->hasLower() ? matrixPtr_->lower() : upper;
+
+    // Fill diagonal values
+    forAll(diag, i)
+    {
+        valuesF64_[diagToCsr_[i]] = diag[i];
+    }
+
+    // Fill upper values
+    forAll(upper, i)
+    {
+        valuesF64_[upperToCsr_[i]] = upper[i];
+    }
+
+    // Fill lower values
+    forAll(lower, i)
+    {
+        valuesF64_[lowerToCsr_[i]] = lower[i];
+    }
+
+    // Compute Gershgorin row-sum estimate of maximum eigenvalue:
+    // λ_max ≈ max_i( |a_ii| + Σ_{j≠i} |a_ij| )
+    // Zero extra cost — we already touched all LDU values above.
+    {
+        const lduAddressing& addr = matrixPtr_->lduAddr();
+        const labelUList& upperAddr = addr.upperAddr();
+        const labelUList& lowerAddr = addr.lowerAddr();
+
+        // Start with diagonal absolute values
+        scalarField rowSums(nRows_, 0.0);
+        forAll(diag, i)
+        {
+            rowSums[i] = mag(diag[i]);
+        }
+
+        // Add off-diagonal contributions
+        forAll(upper, facei)
+        {
+            rowSums[lowerAddr[facei]] += mag(upper[facei]);
+            rowSums[upperAddr[facei]] += mag(lower[facei]);
+        }
+
+        lambdaMax_ = 0.0;
+        forAll(rowSums, i)
+        {
+            lambdaMax_ = std::max(lambdaMax_, double(rowSums[i]));
+        }
+    }
+}
+
+
+void Foam::OGL::lduToCSR::updateValuesF32()
+{
+    // First update F64 values
+    updateValues();
+
+    // Cast to F32
+    for (label i = 0; i < nNonZeros_; i++)
+    {
+        valuesF32_[i] = static_cast<float>(valuesF64_[i]);
+    }
+}
+
+
+std::shared_ptr<Foam::OGL::lduToCSR::CsrMatrixF64>
+Foam::OGL::lduToCSR::createGinkgoMatrixF64
+(
+    std::shared_ptr<const gko::Executor> exec
+) const
+{
+    if (!structureBuilt_)
+    {
+        FatalErrorInFunction
+            << "CSR structure not built"
+            << abort(FatalError);
+    }
+
+    // Create array views over host data, then copy to owning arrays on the
+    // target executor.  Ginkgo v1.8 does not have copy_to_array(); instead
+    // we use the array copy-constructor which deep-copies the view.
+
+    auto rowPtrsView = gko::array<int>::view(
+        exec->get_master(),
+        nRows_ + 1,
+        const_cast<int*>(rowPointers_.data())
+    );
+    gko::array<int> rowPtrs(exec, rowPtrsView);
+
+    auto colIdxsView = gko::array<int>::view(
+        exec->get_master(),
+        nNonZeros_,
+        const_cast<int*>(colIndices_.data())
+    );
+    gko::array<int> colIdxs(exec, colIdxsView);
+
+    auto valsView = gko::array<double>::view(
+        exec->get_master(),
+        nNonZeros_,
+        const_cast<double*>(valuesF64_.data())
+    );
+    gko::array<double> vals(exec, valsView);
+
+    auto matrix = CsrMatrixF64::create(
+        exec,
+        gko::dim<2>(nRows_, nRows_),
+        std::move(vals),
+        std::move(colIdxs),
+        std::move(rowPtrs)
+    );
+
+    // Track GPU memory: rowPtrs(int) + colIdxs(int) + values(double)
+    if (OGLExecutor::initialized())
+    {
+        const size_t bytes =
+            (nRows_ + 1) * sizeof(int)
+          + nNonZeros_ * sizeof(int)
+          + nNonZeros_ * sizeof(double);
+        OGLExecutor::instance().trackAllocation(bytes);
+    }
+
+    return matrix;
+}
+
+
+std::shared_ptr<Foam::OGL::lduToCSR::CsrMatrixF32>
+Foam::OGL::lduToCSR::createGinkgoMatrixF32
+(
+    std::shared_ptr<const gko::Executor> exec
+) const
+{
+    if (!structureBuilt_)
+    {
+        FatalErrorInFunction
+            << "CSR structure not built"
+            << abort(FatalError);
+    }
+
+    auto rowPtrsView = gko::array<int>::view(
+        exec->get_master(),
+        nRows_ + 1,
+        const_cast<int*>(rowPointers_.data())
+    );
+    gko::array<int> rowPtrs(exec, rowPtrsView);
+
+    auto colIdxsView = gko::array<int>::view(
+        exec->get_master(),
+        nNonZeros_,
+        const_cast<int*>(colIndices_.data())
+    );
+    gko::array<int> colIdxs(exec, colIdxsView);
+
+    auto valsView = gko::array<float>::view(
+        exec->get_master(),
+        nNonZeros_,
+        const_cast<float*>(valuesF32_.data())
+    );
+    gko::array<float> vals(exec, valsView);
+
+    auto matrix = CsrMatrixF32::create(
+        exec,
+        gko::dim<2>(nRows_, nRows_),
+        std::move(vals),
+        std::move(colIdxs),
+        std::move(rowPtrs)
+    );
+
+    // Track GPU memory: rowPtrs(int) + colIdxs(int) + values(float)
+    if (OGLExecutor::initialized())
+    {
+        const size_t bytes =
+            (nRows_ + 1) * sizeof(int)
+          + nNonZeros_ * sizeof(int)
+          + nNonZeros_ * sizeof(float);
+        OGLExecutor::instance().trackAllocation(bytes);
+    }
+
+    return matrix;
+}
+
+
+void Foam::OGL::lduToCSR::updateValuesInPlaceF64
+(
+    std::shared_ptr<CsrMatrixF64> existingMatrix
+)
+{
+    // Refresh host values via LDU-to-CSR mapping arrays
+    updateValues();
+
+    // Overwrite GPU values buffer directly — no new allocation, no structure copy
+    haloCopyHostToDevice
+    (
+        existingMatrix->get_values(),
+        valuesF64_.data(),
+        nNonZeros_ * sizeof(double)
+    );
+}
+
+
+void Foam::OGL::lduToCSR::updateValuesInPlaceF32
+(
+    std::shared_ptr<CsrMatrixF32> existingMatrix
+)
+{
+    updateValuesF32();
+
+    haloCopyHostToDevice
+    (
+        existingMatrix->get_values(),
+        valuesF32_.data(),
+        nNonZeros_ * sizeof(float)
+    );
+}
+
+
+// ************************************************************************* //

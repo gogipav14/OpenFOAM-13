@@ -1,0 +1,159 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+Description
+    Example fvSolution configuration for GPU-accelerated pressure solve
+    using OGL (OpenFOAM Ginkgo Layer)
+
+\*---------------------------------------------------------------------------*/
+
+solvers
+{
+    // GPU-accelerated pressure solver
+    p
+    {
+        solver          OGLPCG;     // GPU PCG solver
+        tolerance       1e-6;
+        relTol          0.01;
+
+        OGLCoeffs
+        {
+            // Precision policy: FP64, FP32, or MIXED
+            precisionPolicy     FP32;
+
+            // Iterative refinement: FP32 solve + FP64 residual correction
+            // Recommended ON for mathematical correctness
+            iterativeRefinement on;
+
+            // Maximum refinement iterations (usually 1-3 is sufficient)
+            maxRefineIters      3;
+
+            // Inner tolerance for FP32 solve (looser than final)
+            innerTolerance      1e-4;
+
+            // Cache CSR structure between solves
+            // Set true for static meshes, false if topology changes
+            cacheStructure      true;
+
+            // Cache matrix values between solves
+            // Set false for time-varying coefficients or NCC/AMI
+            cacheValues         false;
+
+            // Debug output level (0=off, 1=basic, 2=verbose)
+            debug               0;
+
+            // Enable timing instrumentation
+            timing              false;
+
+            // Preconditioner options:
+            //   Jacobi          - Point Jacobi (diagonal scaling, default)
+            //   blockJacobi     - Block Jacobi (local block coupling)
+            //   ISAI            - Incomplete Sparse Approximate Inverse (SPD)
+            //   blockJacobiISAI - Multiplicative: ISAI * BJ
+            //   bjIsaiSandwich  - Symmetric: BJ * ISAI * BJ
+            //   bjIsaiAdditive  - Additive: BJ + ISAI
+            //   bjIsaiGmres     - Multiplicative: ISAI * BJ (GMRES)
+            //   bjIsaiInnerOuter - FGMRES outer + CG-BJ inner
+            //   FFT             - FFT Laplacian preconditioner (structured grids)
+            //   fftBlockJacobi  - FFT + Block Jacobi additive (structured grids)
+            preconditioner      Jacobi;
+
+            // Block size for blockJacobi (typical: 4-16)
+            blockSize           4;
+
+            // ISAI sparsity power (1 = A pattern, 2 = A^2 denser pattern)
+            // Higher power = more fill, better approximation, slower setup
+            isaiSparsityPower   1;
+
+            // FFT preconditioner settings (required when preconditioner = FFT
+            // or fftBlockJacobi). Uses cuFFT-based diagonalization of the
+            // discrete Laplacian on uniform Cartesian grids.
+            // Grid dimensions must match blockMesh cell counts.
+            // fftDimensions     (35 150 15);   // (nx ny nz)
+            // meshSpacing       (0.00218 0.01453 0.03467); // (dx dy dz)
+
+            // Adaptive precision: dynamically switch FP32/FP64 based on residual
+            useAdaptivePrecision false;
+
+            // Adaptive precision settings (optional)
+            adaptivePrecision
+            {
+                // Strategy: FIXED_FP32, FIXED_FP64, RESIDUAL_BASED,
+                //           TOLERANCE_BASED, HYBRID
+                strategy            RESIDUAL_BASED;
+
+                // Threshold for stagnation detection (ratio > threshold = stagnating)
+                stagnationThreshold 0.95;
+
+                // Number of consecutive stagnating iterations before switching
+                stagnationCount     3;
+
+                // Buffer factor for tolerance-based switching
+                toleranceBuffer     10.0;
+            }
+        }
+    }
+
+    // GPU-accelerated batched solver for vector fields
+    // Solves U.x, U.y, U.z together for better GPU utilization
+    U
+    {
+        solver          OGLBatched;
+        tolerance       1e-6;
+        relTol          0.1;
+
+        OGLCoeffs
+        {
+            precisionPolicy     FP32;
+            batchSize           3;  // For 3D vector fields
+            cacheStructure      true;
+            cacheValues         true;  // U matrix is usually stable
+        }
+    }
+
+    // Final iteration with tighter tolerance
+    pFinal
+    {
+        $p;
+        relTol          0;
+    }
+
+    // Alternative: CPU velocity solver for asymmetric matrices
+    // Use this instead of OGLBatched when using implicit velocity coupling
+    // or with highly asymmetric discretizations
+    // "(U|UFinal)"
+    // {
+    //     solver          PBiCGStab;
+    //     preconditioner  DILU;
+    //     tolerance       1e-6;
+    //     relTol          0.1;
+    // }
+
+    UFinal
+    {
+        $U;
+        relTol          0;
+    }
+
+    // Turbulence quantities (keep on CPU)
+    "(k|epsilon|omega|nuTilda).*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-8;
+        relTol          0.1;
+    }
+}
+
+PIMPLE
+{
+    nOuterCorrectors    2;
+    nCorrectors         2;
+    nNonOrthogonalCorrectors 1;
+}
+
+// ************************************************************************* //
