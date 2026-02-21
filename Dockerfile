@@ -90,11 +90,10 @@ ENV FOAM_INST_DIR=/opt \
 RUN --mount=type=cache,target=/ccache \
     /bin/bash -c '\
     export FOAM_INST_DIR=/opt && \
-    export SCOTCH_TYPE=system && \
     export WM_CONTINUE_ON_ERROR=1 && \
-    source /opt/OpenFOAM-13/etc/bashrc && \
+    source /opt/OpenFOAM-13/etc/bashrc SCOTCH_TYPE=system && \
     cd /opt/OpenFOAM-13 && \
-    ./Allwmake -j"$(nproc)" 2>&1 | tail -40' \
+    ./Allwmake -j$(( $(nproc) < 32 ? $(nproc) : 32 )) 2>&1 | tee /tmp/openfoam_build.log | tail -80' \
     && test -x /opt/OpenFOAM-13/platforms/linux64GccDPInt32Opt/bin/foamRun \
     && echo "OpenFOAM build verified OK"
 
@@ -127,8 +126,7 @@ ENV GINKGO_ROOT=/opt/ginkgo
 RUN --mount=type=cache,target=/ccache \
     /bin/bash -o pipefail -c '\
     export FOAM_INST_DIR=/opt && \
-    export SCOTCH_TYPE=system && \
-    source /opt/OpenFOAM-13/etc/bashrc && \
+    source /opt/OpenFOAM-13/etc/bashrc SCOTCH_TYPE=system && \
     export GINKGO_ROOT=/opt/ginkgo && \
     cd /opt/OpenFOAM-13/modules/OGL && \
     ./Allwmake 2>&1 | tee /tmp/ogl_build.log | tail -20 && echo "OGL OK" || (grep -E "error:" /tmp/ogl_build.log | head -20 && false)'

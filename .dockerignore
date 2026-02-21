@@ -8,8 +8,11 @@ build/
 *.tar.gz
 *.log
 log.*
-benchmarks/preconditioner_results*
-benchmarks/scaling_results*
+benchmark_results/
+benchmark_results_full/
+benchmarks/
+mixing_cases/
+.claude/
 papers/
 Dockerfile
 .dockerignore

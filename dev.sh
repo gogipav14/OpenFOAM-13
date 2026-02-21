@@ -121,8 +121,7 @@ cmd_compile() {
 
     docker exec "$CONTAINER_NAME" bash -c "
         export FOAM_INST_DIR=/opt
-        export SCOTCH_TYPE=system
-        source /opt/OpenFOAM-13/etc/bashrc
+        source /opt/OpenFOAM-13/etc/bashrc SCOTCH_TYPE=system
         export GINKGO_ROOT=/opt/ginkgo
         export WM_NCOMPPROCS=\$(nproc)
 
@@ -158,13 +157,12 @@ cmd_compile_all() {
 
     docker exec "$CONTAINER_NAME" bash -c "
         export FOAM_INST_DIR=/opt
-        export SCOTCH_TYPE=system
-        source /opt/OpenFOAM-13/etc/bashrc
+        source /opt/OpenFOAM-13/etc/bashrc SCOTCH_TYPE=system
         export GINKGO_ROOT=/opt/ginkgo
         export WM_NCOMPPROCS=\$(nproc)
 
         cd /opt/OpenFOAM-13
-        ./Allwmake -j\$(nproc) 2>&1 | tail -20
+        ./Allwmake -j\$(nproc) 2>&1 | tee /tmp/build.log | tail -40
 
         # Sync and recompile OGL
         rm -rf ${OGL_IMG}/src && cp -a ${OGL_SRC_MOUNT}/src ${OGL_IMG}/src
