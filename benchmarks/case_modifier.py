@@ -83,6 +83,24 @@ OGLBICGSTAB_TEMPLATE = """    {{
         }}
     }}"""
 
+# Template for OGLSpectral direct solver (DCT-based spectral Poisson solver)
+OGLSPECTRAL_TEMPLATE = """    {{
+        solver          OGLSpectral;
+        tolerance       {tolerance};
+        relTol          {relTol};
+        OGLCoeffs
+        {{
+            precisionPolicy     {precisionPolicy};
+            iterativeRefinement {iterativeRefinement};
+            maxRefineIters      {maxRefineIters};
+            cacheStructure      {cacheStructure};
+            cacheValues         {cacheValues};
+            debug               {debug};
+            fftDimensions       ({fft_nx} {fft_ny} {fft_nz});
+            meshSpacing         ({dx} {dy} {dz});
+        }}
+    }}"""
+
 # Template for CPU PCG solver (to replace GAMG for fair comparison)
 CPU_PCG_TEMPLATE = """    {{
         solver          PCG;
@@ -147,6 +165,9 @@ def modify_fvsolution(case_path: Path, variant: str, config: BenchmarkConfig):
         # GPU pressure (OGLPCG) + GPU momentum (OGLBiCGStab)
         content = _replace_pressure_solver_gpu(content, config)
         content = _replace_momentum_solver_gpu(content, config)
+    elif variant == "gpu_spectral":
+        # GPU spectral direct solver (DCT-based, no Krylov iteration)
+        content = _replace_pressure_solver_spectral(content, config)
     elif variant == "cpu_pcg":
         # Force PCG+DIC for fair Krylov-vs-Krylov comparison
         content = _replace_pressure_solver_cpu(content, config)
@@ -205,6 +226,41 @@ def _replace_pressure_solver_gpu(content: str, config: BenchmarkConfig) -> str:
                 blockSize=config.block_size,
                 isaiSparsityPower=config.isai_sparsity_power,
                 fftEntries=fft_entries,
+            )
+        )
+
+    return content
+
+
+def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> str:
+    """Replace pressure solver entries with OGLSpectral (DCT direct solve)."""
+    pressure_fields = [
+        'p_rgh', 'p', 'pcorr', 'pa',
+        'p_rghFinal', 'pFinal', 'pcorrFinal', 'paFinal',
+    ]
+
+    if not config.fft_dimensions or not config.mesh_spacing:
+        raise ValueError(
+            "gpu_spectral variant requires fft_dimensions and mesh_spacing"
+        )
+
+    nx, ny, nz = config.fft_dimensions
+    dx, dy, dz = config.mesh_spacing
+
+    for pfield in pressure_fields:
+        content = _replace_solver_block(
+            content, pfield,
+            OGLSPECTRAL_TEMPLATE.format(
+                tolerance=1e-6,
+                relTol=0.1 if "Final" not in pfield else 0,
+                precisionPolicy=config.precision_policy,
+                iterativeRefinement="on" if config.iterative_refinement else "off",
+                maxRefineIters=config.max_refine_iters,
+                cacheStructure="true" if config.cache_structure else "false",
+                cacheValues="true" if config.cache_values else "false",
+                debug=config.debug_level,
+                fft_nx=nx, fft_ny=ny, fft_nz=nz,
+                dx=dx, dy=dy, dz=dz,
             )
         )
 
@@ -401,7 +457,7 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
     content = controldict.read_text()
 
     # For GPU variant, add libs entry for OGL
-    if variant in ("gpu", "gpu_mg", "gpu_bicgstab"):
+    if variant in ("gpu", "gpu_mg", "gpu_bicgstab", "gpu_spectral"):
         if 'libOGL.so' not in content:
             # Add libs directive before the closing comment or at end
             libs_entry = '\nlibs ("libOGL.so");\n'

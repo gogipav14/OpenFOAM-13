@@ -32,6 +32,9 @@ class RunConfig:
     use_dev_container: bool = False
     dev_container_name: str = "ogl-dev"
 
+    # Extra volume mounts for docker run (list of "host:container" strings)
+    extra_volumes: list = None
+
     # Native settings
     openfoam_dir: str = ""  # WM_PROJECT_DIR
 
@@ -134,20 +137,28 @@ def run_case_docker(
     docker_cmd = ["docker", "run", "--rm"]
 
     # GPU support
-    if variant == "gpu" and run_config.gpu_runtime:
+    if variant and variant.startswith("gpu") and run_config.gpu_runtime:
         docker_cmd.extend(["--gpus", "all"])
 
     # Mount the case directory (must be absolute for Docker volume mount)
     abs_case_path = case_path.resolve()
-    docker_cmd.extend([
-        "-v", f"{abs_case_path}:/benchmark/case",
-        "-w", "/benchmark/case",
-        run_config.docker_image,
-    ])
+    docker_cmd.extend(["-v", f"{abs_case_path}:/benchmark/case"])
+
+    # Extra volume mounts (e.g., updated libraries)
+    if run_config.extra_volumes:
+        for vol in run_config.extra_volumes:
+            docker_cmd.extend(["-v", vol])
+
+    docker_cmd.extend(["-w", "/benchmark/case", run_config.docker_image])
 
     # The command to run inside the container
     # First source OpenFOAM, then run mesh + solver
-    inner_script = _build_inner_script(case_path, host_uid=os.getuid())
+    # Disable FOAM_SIGFPE for GPU variants: CUDA's PTX JIT compiler triggers
+    # spurious FP exceptions during cuFFT plan creation on WSL2.
+    disable_sigfpe = variant is not None and variant.startswith("gpu")
+    inner_script = _build_inner_script(
+        case_path, host_uid=os.getuid(), disable_sigfpe=disable_sigfpe
+    )
     docker_cmd.extend(["bash", "-c", inner_script])
 
     if run_config.dry_run:
@@ -359,7 +370,9 @@ def _build_inner_script_dev(
     return " && ".join(parts)
 
 
-def _build_inner_script(case_path: Path, host_uid: int = None) -> str:
+def _build_inner_script(
+    case_path: Path, host_uid: int = None, disable_sigfpe: bool = False
+) -> str:
     """Build the shell script to run inside the Docker container."""
     parts = [
         # Set USER for OpenFOAM's WM_PROJECT_USER_DIR path resolution
@@ -367,6 +380,9 @@ def _build_inner_script(case_path: Path, host_uid: int = None) -> str:
         "export USER=${USER:-root}",
         "source /opt/OpenFOAM-13/etc/bashrc 2>/dev/null || source /opt/openfoam13/etc/bashrc 2>/dev/null || true",
     ]
+
+    if disable_sigfpe:
+        parts.append("unset FOAM_SIGFPE")
 
     # Check for mesh requirements
     if (case_path / "system" / "blockMeshDict").exists():

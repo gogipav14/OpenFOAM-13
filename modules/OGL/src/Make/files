@@ -15,5 +15,6 @@ OGLSolvers/OGLSolverBase/OGLSolverBase.C
 OGLSolvers/OGLPCGSolver/OGLPCGSolver.C
 OGLSolvers/OGLBatchedSolver/OGLBatchedSolver.C
 OGLSolvers/OGLBiCGStabSolver/OGLBiCGStabSolver.C
+OGLSolvers/OGLSpectralSolver/OGLSpectralSolver.C
 
 LIB = $(FOAM_USER_LIBBIN)/libOGL
