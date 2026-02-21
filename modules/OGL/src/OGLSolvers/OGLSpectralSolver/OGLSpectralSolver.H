@@ -154,13 +154,23 @@ class OGLSpectralSolver
             std::shared_ptr<FFTPreconditioner<ValueType>>& fftSolver
         ) const;
 
-        //- Apply FFT direct solve: x = L^{-1} * b
+        //- Apply FFT direct solve: x = L^{-1} * b (full setup + solve)
         template<typename ValueType>
         label spectralSolveImpl
         (
             scalarField& psi,
             const scalarField& source,
             std::shared_ptr<FoamGinkgoLinOp<ValueType>>& op,
+            std::shared_ptr<FFTPreconditioner<ValueType>>& fftSolver
+        ) const;
+
+        //- Apply DCT solve only (no operator/coefficient setup).
+        //  Used inside the defect correction loop where setup is done once.
+        template<typename ValueType>
+        void applyDCT
+        (
+            scalarField& psi,
+            const scalarField& source,
             std::shared_ptr<FFTPreconditioner<ValueType>>& fftSolver
         ) const;
 
@@ -211,6 +221,17 @@ public:
 
     //- Destructor
     virtual ~OGLSpectralSolver() = default;
+
+
+    // Member Functions
+
+        //- Solve with defect correction (Richardson iteration + DCT)
+        virtual solverPerformance solve
+        (
+            scalarField& psi,
+            const scalarField& source,
+            const direction cmpt = 0
+        ) const override;
 
 
     // Member Operators

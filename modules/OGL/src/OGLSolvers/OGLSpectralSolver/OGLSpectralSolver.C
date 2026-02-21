@@ -306,6 +306,46 @@ Foam::label Foam::OGL::OGLSpectralSolver::spectralSolveImpl
 }
 
 
+template<typename ValueType>
+void Foam::OGL::OGLSpectralSolver::applyDCT
+(
+    scalarField& psi,
+    const scalarField& source,
+    std::shared_ptr<FFTPreconditioner<ValueType>>& fftSolver
+) const
+{
+    auto exec = OGLExecutor::instance().executor();
+
+    // Convert source (RHS) and psi (solution) to Ginkgo Dense on GPU
+    std::shared_ptr<gko::matrix::Dense<ValueType>> b;
+    std::shared_ptr<gko::matrix::Dense<ValueType>> x;
+
+    if constexpr (std::is_same<ValueType, float>::value)
+    {
+        b = FP32CastWrapper::toGinkgoF32(exec, source);
+        x = FP32CastWrapper::toGinkgoF32(exec, psi);
+    }
+    else
+    {
+        b = FP32CastWrapper::toGinkgoF64(exec, source);
+        x = FP32CastWrapper::toGinkgoF64(exec, psi);
+    }
+
+    // Apply DCT direct solve: x = L^{-1} * b
+    fftSolver->apply(b.get(), x.get());
+
+    // Copy solution back to host
+    if constexpr (std::is_same<ValueType, float>::value)
+    {
+        FP32CastWrapper::fromGinkgoF32(x.get(), psi);
+    }
+    else
+    {
+        FP32CastWrapper::fromGinkgoF64(x.get(), psi);
+    }
+}
+
+
 // * * * * * * * * * * * * Protected Member Functions  * * * * * * * * * * * //
 
 Foam::label Foam::OGL::OGLSpectralSolver::solveFP32
@@ -381,6 +421,22 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
     fftSolverF64_(nullptr),
     coeffsInitialized_(false)
 {
+    // Default to more refinement iterations than base class (3).
+    // The spectral solver needs ~5-7 iterations to drive boundary rAU
+    // mismatch below tolerance (rho^k convergence, rho ~ 0.15).
+    if (controlDict_.found("OGLCoeffs"))
+    {
+        const dictionary& d = controlDict_.subDict("OGLCoeffs");
+        if (!d.found("maxRefineIters"))
+        {
+            maxRefineIters_ = 10;
+        }
+    }
+    else
+    {
+        maxRefineIters_ = 10;
+    }
+
     // OGLSolverBase only reads fftDimensions/meshSpacing when preconditioner
     // is FFT or FFT_BLOCK_JACOBI. The spectral solver always needs them,
     // regardless of preconditioner setting, so read them here.
@@ -467,6 +523,202 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
         << nl
         << "  iterativeRefinement: " << iterativeRefinement_
         << endl;
+}
+
+
+// * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
+
+Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
+(
+    scalarField& psi,
+    const scalarField& source,
+    const direction cmpt
+) const
+{
+    word solverName =
+        type() + ":"
+      + (precisionPolicy_ == PrecisionPolicy::FP64 ? "FP64" :
+         precisionPolicy_ == PrecisionPolicy::FP32 ? "FP32" : "MIXED");
+
+    solverPerformance solverPerf(solverName, fieldName_);
+
+    const label nCells = psi.size();
+
+    // Compute initial residual
+    scalar initResidual = computeResidualNorm(psi, source, cmpt);
+    solverPerf.initialResidual() = initResidual;
+    solverPerf.finalResidual() = initResidual;
+
+    if (initResidual < tolerance_)
+    {
+        solverPerf.nIterations() = 0;
+        return solverPerf;
+    }
+
+    // Setup phase (once per solve call):
+    // Ensure the operator and FFT solver exist and have current coefficients.
+    // This extracts mean CSR couplings from the assembled pressure matrix
+    // to match the DCT eigenvalues to the actual FV operator.
+    try
+    {
+        if (precisionPolicy_ == PrecisionPolicy::FP64)
+        {
+            ensureOperator(operatorF64_);
+            initFFTSolver(operatorF64_, fftSolverF64_);
+        }
+        else
+        {
+            ensureOperator(operatorF32_);
+            initFFTSolver(operatorF32_, fftSolverF32_);
+        }
+        coeffsInitialized_ = true;
+    }
+    catch (const std::exception& e)
+    {
+        OGLExecutor::checkGinkgoError("spectral setup", e);
+    }
+
+    // Preconditioned CG with DCT as preconditioner.
+    //
+    // CG is required instead of Richardson because M^{-1} (DCT solve)
+    // has O(N²) condition number that amplifies boundary residuals,
+    // making Richardson diverge. CG handles the eigenvalue spread
+    // optimally and is guaranteed to converge for SPD systems.
+    //
+    // Per iteration:
+    //   1 SpMV:       q = A*p            (matrix_.Amul, FP64)
+    //   1 DCT apply:  z = M^{-1}*r       (cuFFT, O(N log N))
+    //   2 dot products: (r,z) and (p,q)
+    //   3 vector updates: x, r, p
+    //
+    // With DCT preconditioner, effective condition number ~10-30
+    // (vs O(N²) unpreconditioned), giving convergence in 5-15 iters.
+
+    // Initial residual: r = source - A*psi
+    scalarField rField(nCells);
+    {
+        scalarField Apsi(nCells);
+        matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
+        forAll(rField, i) { rField[i] = source[i] - Apsi[i]; }
+    }
+
+    // Apply preconditioner: z = M^{-1} * r
+    scalarField zField(nCells, 0.0);
+    try
+    {
+        if (precisionPolicy_ == PrecisionPolicy::FP64)
+        {
+            applyDCT<double>(zField, rField, fftSolverF64_);
+        }
+        else
+        {
+            applyDCT<float>(zField, rField, fftSolverF32_);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        OGLExecutor::checkGinkgoError("spectral PCG init", e);
+    }
+
+    // Initial search direction: p = z
+    scalarField pField(zField);
+
+    // rz = (r, z)
+    scalar rz = gSumProd(rField, zField, matrix().mesh().comm());
+
+    label totalIters = 0;
+
+    for (label iter = 0; iter < maxRefineIters_; iter++)
+    {
+        // q = A * p
+        scalarField qField(nCells);
+        matrix_.Amul(qField, pField, interfaceBouCoeffs_, interfaces_, cmpt);
+
+        // alpha = (r, z) / (p, q)
+        scalar pq = gSumProd(pField, qField, matrix().mesh().comm());
+
+        // Protect against zero denominator
+        if (mag(pq) < VSMALL)
+        {
+            break;
+        }
+
+        scalar alpha = rz / pq;
+
+        // x = x + alpha * p
+        // r = r - alpha * q
+        forAll(psi, i)
+        {
+            psi[i] += alpha * pField[i];
+            rField[i] -= alpha * qField[i];
+        }
+
+        totalIters++;
+
+        // Check convergence (compute normalized residual norm)
+        scalar residualNorm = computeResidualNorm(psi, source, cmpt);
+        solverPerf.finalResidual() = residualNorm;
+
+        if (debug_ >= 1)
+        {
+            Info<< "OGLSpectral: PCG Iter " << iter + 1
+                << ", residual = " << residualNorm << endl;
+        }
+
+        if (residualNorm < tolerance_)
+        {
+            break;
+        }
+
+        if (relTol_ > 0 && residualNorm < relTol_ * initResidual)
+        {
+            break;
+        }
+
+        // Apply preconditioner: z = M^{-1} * r
+        forAll(zField, i) { zField[i] = 0.0; }
+        try
+        {
+            if (precisionPolicy_ == PrecisionPolicy::FP64)
+            {
+                applyDCT<double>(zField, rField, fftSolverF64_);
+            }
+            else
+            {
+                applyDCT<float>(zField, rField, fftSolverF32_);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            OGLExecutor::checkGinkgoError("spectral PCG precond", e);
+        }
+
+        // beta = (r_new, z_new) / (r_old, z_old)
+        scalar rzNew = gSumProd(rField, zField, matrix().mesh().comm());
+        scalar beta = rzNew / (rz + VSMALL);
+        rz = rzNew;
+
+        // p = z + beta * p
+        forAll(pField, i)
+        {
+            pField[i] = zField[i] + beta * pField[i];
+        }
+    }
+
+    solverPerf.nIterations() = totalIters;
+
+    // Persist cached GPU state for reuse across solver instantiations
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        auto& entry = cache_[fieldName_];
+        entry.opF32 = operatorF32_;
+        entry.opF64 = operatorF64_;
+        entry.fftF32 = fftSolverF32_;
+        entry.fftF64 = fftSolverF64_;
+        entry.coeffsInitialized = coeffsInitialized_;
+    }
+
+    return solverPerf;
 }
 
 

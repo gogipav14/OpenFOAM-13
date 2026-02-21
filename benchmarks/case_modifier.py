@@ -247,6 +247,11 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
     nx, ny, nz = config.fft_dimensions
     dx, dy, dz = config.mesh_spacing
 
+    # Spectral solver needs more refinement iterations than Krylov solvers:
+    # the DCT direct solve leaves ~15% residual from boundary rAU mismatch,
+    # and Richardson iteration converges as rho^k (rho ~ 0.15).
+    spectral_max_iters = max(config.max_refine_iters, 10)
+
     for pfield in pressure_fields:
         content = _replace_solver_block(
             content, pfield,
@@ -255,7 +260,7 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
                 relTol=0.1 if "Final" not in pfield else 0,
                 precisionPolicy=config.precision_policy,
                 iterativeRefinement="on" if config.iterative_refinement else "off",
-                maxRefineIters=config.max_refine_iters,
+                maxRefineIters=spectral_max_iters,
                 cacheStructure="true" if config.cache_structure else "false",
                 cacheValues="true" if config.cache_values else "false",
                 debug=config.debug_level,
