@@ -225,7 +225,7 @@ public:
 
     // Member Functions
 
-        //- Solve with defect correction (Richardson iteration + DCT)
+        //- Solve with PCG using DCT preconditioner
         virtual solverPerformance solve
         (
             scalarField& psi,

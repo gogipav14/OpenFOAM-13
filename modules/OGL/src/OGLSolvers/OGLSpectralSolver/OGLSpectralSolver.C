@@ -544,66 +544,87 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
 
     const label nCells = psi.size();
 
-    // Compute initial residual
-    scalar initResidual = computeResidualNorm(psi, source, cmpt);
+    // --- Compute A*psi once for normFactor + initial residual (1 SpMV)
+    scalarField wA(nCells);
+    matrix_.Amul(wA, psi, interfaceBouCoeffs_, interfaces_, cmpt);
+
+    // Norm factor (same computation as OpenFOAM's PCG.C)
+    scalarField tmpField(nCells);
+    scalar normFactor = this->normFactor(psi, source, wA, tmpField);
+
+    // Initial residual: r = source - A*psi (reuse wA from above)
+    scalarField rField(nCells);
+    forAll(rField, i) { rField[i] = source[i] - wA[i]; }
+
+    scalar initResidual =
+        gSumMag(rField, matrix().mesh().comm()) / normFactor;
     solverPerf.initialResidual() = initResidual;
     solverPerf.finalResidual() = initResidual;
 
-    if (initResidual < tolerance_)
+    if
+    (
+        minIter_ <= 0
+     && solverPerf.checkConvergence(tolerance_, relTol_)
+    )
     {
         solverPerf.nIterations() = 0;
         return solverPerf;
     }
 
-    // Setup phase (once per solve call):
-    // Ensure the operator and FFT solver exist and have current coefficients.
-    // This extracts mean CSR couplings from the assembled pressure matrix
-    // to match the DCT eigenvalues to the actual FV operator.
-    try
+    // --- Setup phase: extract mean CSR couplings from the assembled
+    //     pressure matrix to calibrate DCT eigenvalues.
+    //
+    //     Only done ONCE per field — the mean coupling coefficients
+    //     change negligibly between timesteps/PISO corrections (the
+    //     mesh geometry is constant and rAU variation is small on
+    //     structured grids). PCG handles the remaining approximation.
+    //
+    //     This eliminates the GPU->CPU CSR copy + CPU mean computation
+    //     that previously dominated solve time at large mesh sizes.
+    if (!coeffsInitialized_)
     {
-        if (precisionPolicy_ == PrecisionPolicy::FP64)
+        auto setupStart = std::chrono::high_resolution_clock::now();
+
+        try
         {
-            ensureOperator(operatorF64_);
-            initFFTSolver(operatorF64_, fftSolverF64_);
+            if (precisionPolicy_ == PrecisionPolicy::FP64)
+            {
+                ensureOperator(operatorF64_);
+                initFFTSolver(operatorF64_, fftSolverF64_);
+            }
+            else
+            {
+                ensureOperator(operatorF32_);
+                initFFTSolver(operatorF32_, fftSolverF32_);
+            }
+            coeffsInitialized_ = true;
         }
-        else
+        catch (const std::exception& e)
         {
-            ensureOperator(operatorF32_);
-            initFFTSolver(operatorF32_, fftSolverF32_);
+            OGLExecutor::checkGinkgoError("spectral setup", e);
         }
-        coeffsInitialized_ = true;
-    }
-    catch (const std::exception& e)
-    {
-        OGLExecutor::checkGinkgoError("spectral setup", e);
-    }
 
-    // Preconditioned CG with DCT as preconditioner.
-    //
-    // CG is required instead of Richardson because M^{-1} (DCT solve)
-    // has O(N²) condition number that amplifies boundary residuals,
-    // making Richardson diverge. CG handles the eigenvalue spread
-    // optimally and is guaranteed to converge for SPD systems.
-    //
-    // Per iteration:
-    //   1 SpMV:       q = A*p            (matrix_.Amul, FP64)
-    //   1 DCT apply:  z = M^{-1}*r       (cuFFT, O(N log N))
-    //   2 dot products: (r,z) and (p,q)
-    //   3 vector updates: x, r, p
-    //
-    // With DCT preconditioner, effective condition number ~10-30
-    // (vs O(N²) unpreconditioned), giving convergence in 5-15 iters.
+        auto setupEnd = std::chrono::high_resolution_clock::now();
+        double setupMs = std::chrono::duration<double, std::milli>(
+            setupEnd - setupStart
+        ).count();
 
-    // Initial residual: r = source - A*psi
-    scalarField rField(nCells);
-    {
-        scalarField Apsi(nCells);
-        matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
-        forAll(rField, i) { rField[i] = source[i] - Apsi[i]; }
+        Info<< "OGLSpectral: coefficient setup: " << setupMs << " ms"
+            << " (cached for subsequent solves)" << endl;
     }
 
-    // Apply preconditioner: z = M^{-1} * r
+    // --- Preconditioned CG with DCT preconditioner.
+    //
+    //     Per iteration: 1 SpMV + 1 DCT + 2 dot products + 3 AXPY
+    //     Convergence check uses recurrence residual (no extra SpMV),
+    //     matching OpenFOAM's PCG.C pattern.
+
+    // Pre-allocate working vectors (outside loop)
     scalarField zField(nCells, 0.0);
+    scalarField pField(nCells, 0.0);
+    scalarField qField(nCells);
+
+    // z = M^{-1} * r (initial preconditioner application)
     try
     {
         if (precisionPolicy_ == PrecisionPolicy::FP64)
@@ -620,33 +641,31 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
         OGLExecutor::checkGinkgoError("spectral PCG init", e);
     }
 
-    // Initial search direction: p = z
-    scalarField pField(zField);
+    // p = z
+    forAll(pField, i) { pField[i] = zField[i]; }
 
     // rz = (r, z)
     scalar rz = gSumProd(rField, zField, matrix().mesh().comm());
 
     label totalIters = 0;
 
-    for (label iter = 0; iter < maxRefineIters_; iter++)
+    do
     {
         // q = A * p
-        scalarField qField(nCells);
         matrix_.Amul(qField, pField, interfaceBouCoeffs_, interfaces_, cmpt);
 
         // alpha = (r, z) / (p, q)
         scalar pq = gSumProd(pField, qField, matrix().mesh().comm());
 
-        // Protect against zero denominator
-        if (mag(pq) < VSMALL)
+        // Singularity check (same as PCG.C)
+        if (solverPerf.checkSingularity(mag(pq) / normFactor))
         {
             break;
         }
 
         scalar alpha = rz / pq;
 
-        // x = x + alpha * p
-        // r = r - alpha * q
+        // x += alpha * p,  r -= alpha * q
         forAll(psi, i)
         {
             psi[i] += alpha * pField[i];
@@ -655,27 +674,17 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
 
         totalIters++;
 
-        // Check convergence (compute normalized residual norm)
-        scalar residualNorm = computeResidualNorm(psi, source, cmpt);
-        solverPerf.finalResidual() = residualNorm;
+        // Convergence from recurrence residual (no extra SpMV!)
+        solverPerf.finalResidual() =
+            gSumMag(rField, matrix().mesh().comm()) / normFactor;
 
         if (debug_ >= 1)
         {
-            Info<< "OGLSpectral: PCG Iter " << iter + 1
-                << ", residual = " << residualNorm << endl;
+            Info<< "OGLSpectral: PCG Iter " << totalIters
+                << ", residual = " << solverPerf.finalResidual() << endl;
         }
 
-        if (residualNorm < tolerance_)
-        {
-            break;
-        }
-
-        if (relTol_ > 0 && residualNorm < relTol_ * initResidual)
-        {
-            break;
-        }
-
-        // Apply preconditioner: z = M^{-1} * r
+        // z = M^{-1} * r
         forAll(zField, i) { zField[i] = 0.0; }
         try
         {
@@ -703,7 +712,15 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
         {
             pField[i] = zField[i] + beta * pField[i];
         }
-    }
+
+    } while
+    (
+        (
+            totalIters < maxRefineIters_
+        && !solverPerf.checkConvergence(tolerance_, relTol_)
+        )
+     || totalIters < minIter_
+    );
 
     solverPerf.nIterations() = totalIters;
 

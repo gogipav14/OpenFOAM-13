@@ -42,6 +42,8 @@ class BenchmarkConfig:
     mg_smoother: str = "jacobi"  # jacobi, chebyshev, blockJacobi
     mg_cache_interval: int = 0   # 0=rebuild every call, N>0=rebuild every N calls
     mg_cache_max_iters: int = 200  # force rebuild if iters exceed this
+    # CFL conditioning (always enforced for transient cases)
+    max_courant: float = 0.5      # Maximum Courant number (0 = disabled)
 
 
 # Template for OGLPCG solver entry in fvSolution
@@ -481,6 +483,12 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
             else:
                 content += libs_entry
 
+    # Enforce CFL conditioning for transient cases via adjustTimeStep.
+    # This is always applied (unless max_courant=0) to prevent CFL blowups
+    # when mesh resolution changes from the tutorial default.
+    if config.max_courant > 0:
+        content = _enforce_cfl(content, config.max_courant)
+
     # Limit timesteps if configured
     if config.max_timesteps > 0:
         content = _limit_timesteps(content, config.max_timesteps)
@@ -489,6 +497,50 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
     content = _minimize_output(content)
 
     controldict.write_text(content)
+
+
+def _enforce_cfl(content: str, max_courant: float) -> str:
+    """
+    Enforce CFL conditioning via OpenFOAM's adjustTimeStep mechanism.
+    Skips steady-state cases (where deltaT is irrelevant).
+    """
+    # Skip steady-state cases
+    if re.search(r'startFrom\s+latestTime', content) and re.search(
+        r'stopAt\s+writeNow', content
+    ):
+        return content
+
+    # Update or add adjustTimeStep
+    if re.search(r'adjustTimeStep\s+\w+\s*;', content):
+        content = re.sub(
+            r'adjustTimeStep\s+\w+\s*;',
+            'adjustTimeStep  yes;',
+            content,
+        )
+    else:
+        # Insert after deltaT line
+        dt_match = re.search(r'(deltaT\s+[\d.eE+-]+\s*;)', content)
+        if dt_match:
+            content = content.replace(
+                dt_match.group(1),
+                dt_match.group(1) + f'\n\nadjustTimeStep  yes;',
+            )
+
+    # Update or add maxCo
+    if re.search(r'maxCo\s+[\d.eE+-]+\s*;', content):
+        content = re.sub(
+            r'maxCo\s+[\d.eE+-]+\s*;',
+            f'maxCo           {max_courant};',
+            content,
+        )
+    else:
+        content = re.sub(
+            r'adjustTimeStep\s+yes\s*;',
+            f'adjustTimeStep  yes;\nmaxCo           {max_courant};',
+            content,
+        )
+
+    return content
 
 
 def _limit_timesteps(content: str, max_steps: int) -> str:

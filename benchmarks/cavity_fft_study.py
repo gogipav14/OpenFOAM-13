@@ -245,7 +245,8 @@ def run_precond_variant(
     else:
         actual_cells = update_mesh_2d(var_dir, nx, ny)
 
-    # Force ascii write for log parsing and set writeInterval
+    # Force ascii write for log parsing and set writeInterval.
+    # CFL conditioning is handled globally by case_modifier._enforce_cfl().
     controldict = var_dir / "system" / "controlDict"
     content = controldict.read_text()
     content = re.sub(r'writeFormat\s+\w+\s*;', 'writeFormat     ascii;', content)
