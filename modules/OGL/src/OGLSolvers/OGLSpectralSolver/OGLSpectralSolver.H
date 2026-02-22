@@ -39,6 +39,21 @@ Description
     diagonal (Jacobi) preconditioning. This is an additive Schwarz
     preconditioner where PCG handles the zone boundary coupling.
 
+    Overlapping Schwarz (Phase 5):
+    When overlapWidth > 0, the DCT zone is extended by N layers of cells
+    in each direction. The DCT operates on the extended zone, and ALL
+    extended cells receive the DCT result (additive Schwarz, SPD for CG).
+    Non-extended cells receive Jacobi. NOTE: convergence requires
+    overlap >= distance from zone boundary to mesh boundary, because
+    DCT-II imposes Neumann BCs that must align with actual mesh boundaries.
+    Set overlap >= trim distance (e.g., overlapWidth 6 with zone_y_trim 5).
+
+    Auto-detection (Phase 4):
+    When fftDimensions and meshSpacing are omitted, the solver detects the
+    structured topology from the ldu face addressing pattern. The stride
+    histogram of (neighbour - owner) reveals the mesh dimensions, and the
+    mean coupling coefficients give the mesh spacing.
+
     Configuration example:
     \verbatim
     solvers
@@ -54,11 +69,14 @@ Description
                 precisionPolicy     FP32;
                 iterativeRefinement on;
                 maxRefineIters      10;
-                fftDimensions       (200 200 1);
-                meshSpacing         (0.005 0.005 0.01);
+
+                // Optional: specify explicitly or omit for auto-detect
+                // fftDimensions       (200 200 1);
+                // meshSpacing         (0.005 0.005 0.01);
 
                 // Optional: zone-based domain decomposition
                 // spectralZone    innerRegion;
+                // overlapWidth    6;  // layers of overlap (>= trim)
             }
         }
     }
@@ -104,6 +122,8 @@ class OGLSpectralSolver
             std::shared_ptr<FoamGinkgoLinOp<double>> opF64;
             std::shared_ptr<FFTPreconditioner<float>> fftF32;
             std::shared_ptr<FFTPreconditioner<double>> fftF64;
+            std::shared_ptr<FFTPreconditioner<float>> extFftF32;
+            std::shared_ptr<FFTPreconditioner<double>> extFftF64;
             bool coeffsInitialized;
         };
 
@@ -135,7 +155,7 @@ class OGLSpectralSolver
         mutable bool coeffsInitialized_;
 
 
-    // Zone decomposition data (additive Schwarz)
+    // Zone decomposition data (additive Schwarz / RAS)
 
         //- Name of the cellZone for spectral preconditioning (empty = off)
         word spectralZoneName_;
@@ -152,8 +172,28 @@ class OGLSpectralSolver
         //- Whether zone mappings have been initialized
         mutable bool zoneInitialized_;
 
+        //- Number of overlap layers for Restricted Additive Schwarz (0 = off)
+        label overlapWidth_;
+
+        //- Extended zone cells (zone + overlap), sorted
+        mutable labelList extendedZoneCells_;
+
+        //- Map from extended index to zone index (-1 for overlap-only cells)
+        mutable labelList extToZoneMap_;
+
+        //- FFT dimensions for the extended zone (zone + overlap)
+        mutable Vector<label> extFftDims_;
+
+        //- FP32/FP64 FFT solver for extended zone (separate from main solver)
+        mutable std::shared_ptr<FFTPreconditioner<float>> extFftF32_;
+        mutable std::shared_ptr<FFTPreconditioner<double>> extFftF64_;
+
 
     // Private Member Functions
+
+        //- Auto-detect structured mesh dimensions from ldu face addressing.
+        //  Sets fftDimensions_ and meshSpacing_. Returns true on success.
+        bool detectStructuredMesh();
 
         //- Initialize zone cell mappings from the mesh cellZone
         void initZone() const;
@@ -161,6 +201,16 @@ class OGLSpectralSolver
         //- Apply zone-based additive Schwarz preconditioner:
         //  zone cells get DCT, non-zone cells get Jacobi
         void applyZonePreconditioner
+        (
+            scalarField& z,
+            const scalarField& r
+        ) const;
+
+        //- Apply overlapping additive Schwarz preconditioner:
+        //  DCT on extended zone (zone + overlap layers), scatter ALL
+        //  extended cells. Non-extended cells get Jacobi.
+        //  SPD for CG. Converges when overlap >= distance-to-boundary.
+        void applyOverlapAS
         (
             scalarField& z,
             const scalarField& r

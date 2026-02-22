@@ -46,6 +46,8 @@ class BenchmarkConfig:
     max_courant: float = 0.5      # Maximum Courant number (0 = disabled)
     # Zone-based spectral decomposition (Phase 3)
     spectral_zone: str = ""       # cellZone name for additive Schwarz (empty = off)
+    # Overlap width for Restricted Additive Schwarz (0 = non-overlapping)
+    overlap_width: int = 0
 
 
 # Template for OGLPCG solver entry in fvSolution
@@ -88,6 +90,7 @@ OGLBICGSTAB_TEMPLATE = """    {{
     }}"""
 
 # Template for OGLSpectral direct solver (DCT-based spectral Poisson solver)
+# fftEntries is optional: omit for auto-detect from ldu face addressing
 OGLSPECTRAL_TEMPLATE = """    {{
         solver          OGLSpectral;
         tolerance       {tolerance};
@@ -99,9 +102,7 @@ OGLSPECTRAL_TEMPLATE = """    {{
             maxRefineIters      {maxRefineIters};
             cacheStructure      {cacheStructure};
             cacheValues         {cacheValues};
-            debug               {debug};
-            fftDimensions       ({fft_nx} {fft_ny} {fft_nz});
-            meshSpacing         ({dx} {dy} {dz});{zoneEntry}
+            debug               {debug};{fftEntries}{zoneEntry}
         }}
     }}"""
 
@@ -169,9 +170,12 @@ def modify_fvsolution(case_path: Path, variant: str, config: BenchmarkConfig):
         # GPU pressure (OGLPCG) + GPU momentum (OGLBiCGStab)
         content = _replace_pressure_solver_gpu(content, config)
         content = _replace_momentum_solver_gpu(content, config)
-    elif variant in ("gpu_spectral", "gpu_spectral_zone"):
-        # GPU spectral direct solver (DCT-based, no Krylov iteration)
+    elif variant in ("gpu_spectral", "gpu_spectral_zone", "gpu_spectral_auto",
+                      "gpu_spectral_ras"):
+        # GPU spectral direct solver (DCT-based)
         # gpu_spectral_zone: zone-based additive Schwarz (DCT on zone, Jacobi outside)
+        # gpu_spectral_auto: auto-detect mesh dimensions (no fftDimensions/meshSpacing)
+        # gpu_spectral_ras: overlapping Schwarz (RAS) with DCT on extended zone
         content = _replace_pressure_solver_spectral(content, config)
     elif variant == "cpu_pcg":
         # Force PCG+DIC for fair Krylov-vs-Krylov comparison
@@ -238,19 +242,25 @@ def _replace_pressure_solver_gpu(content: str, config: BenchmarkConfig) -> str:
 
 
 def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> str:
-    """Replace pressure solver entries with OGLSpectral (DCT direct solve)."""
+    """Replace pressure solver entries with OGLSpectral (DCT direct solve).
+
+    When fft_dimensions and mesh_spacing are None, the solver auto-detects
+    the structured mesh topology from the ldu face addressing pattern.
+    """
     pressure_fields = [
         'p_rgh', 'p', 'pcorr', 'pa',
         'p_rghFinal', 'pFinal', 'pcorrFinal', 'paFinal',
     ]
 
-    if not config.fft_dimensions or not config.mesh_spacing:
-        raise ValueError(
-            "gpu_spectral variant requires fft_dimensions and mesh_spacing"
+    # Build FFT entries (optional: omit for auto-detect)
+    fft_entries = ""
+    if config.fft_dimensions and config.mesh_spacing:
+        nx, ny, nz = config.fft_dimensions
+        dx, dy, dz = config.mesh_spacing
+        fft_entries = (
+            f"\n            fftDimensions       ({nx} {ny} {nz});"
+            f"\n            meshSpacing         ({dx} {dy} {dz});"
         )
-
-    nx, ny, nz = config.fft_dimensions
-    dx, dy, dz = config.mesh_spacing
 
     # Spectral solver needs more refinement iterations than Krylov solvers:
     # the DCT direct solve leaves ~15% residual from boundary rAU mismatch,
@@ -261,6 +271,8 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
     zone_entry = ""
     if hasattr(config, 'spectral_zone') and config.spectral_zone:
         zone_entry = f"\n            spectralZone    {config.spectral_zone};"
+        if hasattr(config, 'overlap_width') and config.overlap_width > 0:
+            zone_entry += f"\n            overlapWidth    {config.overlap_width};"
 
     for pfield in pressure_fields:
         content = _replace_solver_block(
@@ -274,8 +286,7 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
                 cacheStructure="true" if config.cache_structure else "false",
                 cacheValues="true" if config.cache_values else "false",
                 debug=config.debug_level,
-                fft_nx=nx, fft_ny=ny, fft_nz=nz,
-                dx=dx, dy=dy, dz=dz,
+                fftEntries=fft_entries,
                 zoneEntry=zone_entry,
             )
         )
@@ -473,7 +484,9 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
     content = controldict.read_text()
 
     # For GPU variant, add libs entry for OGL
-    if variant in ("gpu", "gpu_mg", "gpu_bicgstab", "gpu_spectral", "gpu_spectral_zone"):
+    if variant in ("gpu", "gpu_mg", "gpu_bicgstab", "gpu_spectral",
+                   "gpu_spectral_zone", "gpu_spectral_auto",
+                   "gpu_spectral_ras"):
         if 'libOGL.so' not in content:
             # Add libs directive before the closing comment or at end
             libs_entry = '\nlibs ("libOGL.so");\n'

@@ -67,37 +67,60 @@ VARIANTS = [
         "needs_fft_dims": True,
     },
     {
+        "name": "gpu_spectral_auto",
+        "label": "GPU Spectral Auto",
+        "variant": "gpu_spectral_auto",
+        # No needs_fft_dims: auto-detect from ldu face addressing
+    },
+    {
         "name": "gpu_spectral_zone",
         "label": "GPU Spectral Zone",
         "variant": "gpu_spectral_zone",
         "needs_fft_dims": True,
         "needs_zone": True,
     },
+    {
+        "name": "gpu_spectral_ras",
+        "label": "GPU Spectral AS",
+        "variant": "gpu_spectral_ras",
+        "needs_fft_dims": True,
+        "needs_zone": True,
+        "overlap_width": 6,  # >= trim → extended zone covers full mesh
+        "zone_y_trim": 5,  # Trim 5 rows from each end in y
+    },
 ]
 
 # Zone configuration: cut ZONE_Y_TRIM cells from each end in y
 # This creates a rectangular sub-block for DCT, with Jacobi on the boundary layer.
 #
-# NOTE (Phase 3 finding): ZONE_Y_TRIM > 0 causes PCG divergence because
-# DCT-II encodes Neumann BCs at zone boundaries, but zone-internal boundaries
-# have non-zero pressure gradient coupling to non-zone cells. The Neumann
-# mismatch makes the additive Schwarz preconditioner indefinite.
+# NOTE (Phase 3/5 findings):
+# - Non-overlapping zone (overlapWidth=0): diverges because DCT-II imposes
+#   Neumann BCs at zone boundaries where actual condition is internal coupling.
+# - Overlap < trim: does NOT fix convergence — moves boundary error outward
+#   but DCT-II Neumann mismatch persists at extended zone boundary.
+# - Overlap >= trim: CONVERGES (matches full-mesh spectral) because extended
+#   zone reaches actual mesh boundaries where Neumann IS correct.
+# Conclusion: set overlapWidth >= ZONE_Y_TRIM for zone-based spectral.
 # ZONE_Y_TRIM = 0 (zone = full mesh) validates the gather/scatter machinery.
 # For mixed meshes, overlapping Schwarz or Schur complement is needed.
 ZONE_Y_TRIM = 0   # cells to exclude from each y-end (0 = full mesh zone)
 ZONE_NAME = "spectralZone"
 
 
-def create_toposet_dict(case_path: Path, nx: int, ny: int, nz: int) -> tuple:
+def create_toposet_dict(
+    case_path: Path, nx: int, ny: int, nz: int,
+    zone_y_trim: int = None
+) -> tuple:
     """Create topoSetDict to define a rectangular cellZone for spectral solve.
 
-    Cuts ZONE_Y_TRIM cells from each end in the y-direction, keeping the
+    Cuts zone_y_trim cells from each end in the y-direction, keeping the
     full x and z extent. Returns (zone_nx, zone_ny, zone_nz).
     """
+    trim = zone_y_trim if zone_y_trim is not None else ZONE_Y_TRIM
     dy = DOMAIN_Y / ny
-    y_min = ZONE_Y_TRIM * dy
-    y_max = DOMAIN_Y - ZONE_Y_TRIM * dy
-    zone_ny = ny - 2 * ZONE_Y_TRIM
+    y_min = trim * dy
+    y_max = DOMAIN_Y - trim * dy
+    zone_ny = ny - 2 * trim
 
     # Small epsilon to avoid floating-point boundary inclusion issues
     eps = dy * 0.01
@@ -210,6 +233,7 @@ def run_variant(
         fft_dimensions=fft_dims,
         mesh_spacing=mesh_spacing,
         spectral_zone=spectral_zone,
+        overlap_width=var.get("overlap_width", 0),
     )
 
     print(f"    Preparing {var_name}...")
@@ -223,7 +247,10 @@ def run_variant(
 
     # Zone: create topoSetDict and patch fftDimensions in fvSolution to zone size
     if var.get("needs_zone"):
-        zone_nx, zone_ny, zone_nz = create_toposet_dict(var_dir, nx, ny, nz)
+        zone_nx, zone_ny, zone_nz = create_toposet_dict(
+            var_dir, nx, ny, nz,
+            zone_y_trim=var.get("zone_y_trim"),
+        )
         zone_cells = zone_nx * zone_ny * zone_nz
         print(f"    Zone: {zone_nx}x{zone_ny}x{zone_nz} = {zone_cells:,} / "
               f"{actual_cells:,} cells ({100*zone_cells/actual_cells:.0f}%)")

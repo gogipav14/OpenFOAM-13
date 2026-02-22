@@ -30,9 +30,11 @@ License
 #include "addToRunTimeSelectionTable.H"
 #include "polyMesh.H"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -503,7 +505,11 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
     coeffsInitialized_(false),
     spectralZoneName_(),
     useZone_(false),
-    zoneInitialized_(false)
+    zoneInitialized_(false),
+    overlapWidth_(0),
+    extFftDims_(0, 0, 0),
+    extFftF32_(nullptr),
+    extFftF64_(nullptr)
 {
     // Default to more refinement iterations than base class (3).
     // The spectral solver needs ~5-7 iterations to drive boundary rAU
@@ -541,9 +547,14 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
             spectralZoneName_ = oglDict.lookup<word>("spectralZone");
             useZone_ = true;
         }
+        if (oglDict.found("overlapWidth"))
+        {
+            overlapWidth_ = oglDict.lookup<label>("overlapWidth");
+        }
     }
 
-    // Validate that FFT dimensions are provided
+    // Auto-detect or validate FFT dimensions
+    bool autoDetected = false;
     if
     (
         fftDimensions_.x() <= 0
@@ -551,14 +562,27 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
      || fftDimensions_.z() <= 0
     )
     {
-        FatalErrorInFunction
-            << "OGLSpectral requires fftDimensions in OGLCoeffs. "
-            << "Got: (" << fftDimensions_.x()
-            << " " << fftDimensions_.y()
-            << " " << fftDimensions_.z() << ")"
-            << abort(FatalError);
+        if (useZone_)
+        {
+            FatalErrorInFunction
+                << "OGLSpectral: fftDimensions required when using "
+                << "spectralZone (auto-detect not supported for zones)"
+                << abort(FatalError);
+        }
+
+        if (!detectStructuredMesh())
+        {
+            FatalErrorInFunction
+                << "OGLSpectral: fftDimensions not specified and "
+                << "auto-detection failed. Specify fftDimensions in "
+                << "OGLCoeffs."
+                << abort(FatalError);
+        }
+        autoDetected = true;
     }
 
+    // meshSpacing: set dummy values if not specified.
+    // updateCoeffs will override with actual coupling coefficients.
     if
     (
         meshSpacing_.x() <= 0
@@ -566,12 +590,7 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
      || meshSpacing_.z() <= 0
     )
     {
-        FatalErrorInFunction
-            << "OGLSpectral requires meshSpacing in OGLCoeffs. "
-            << "Got: (" << meshSpacing_.x()
-            << " " << meshSpacing_.y()
-            << " " << meshSpacing_.z() << ")"
-            << abort(FatalError);
+        meshSpacing_ = Vector<scalar>(1.0, 1.0, 1.0);
     }
 
     // Restore cached state from previous instantiation
@@ -584,6 +603,8 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
             operatorF64_ = it->second.opF64;
             fftSolverF32_ = it->second.fftF32;
             fftSolverF64_ = it->second.fftF64;
+            extFftF32_ = it->second.extFftF32;
+            extFftF64_ = it->second.extFftF64;
             coeffsInitialized_ = it->second.coeffsInitialized;
 
             if (debug_ >= 2)
@@ -601,7 +622,8 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
         << fftDimensions_.z()
         << " = " << (fftDimensions_.x() * fftDimensions_.y()
                       * fftDimensions_.z())
-        << " cells" << nl
+        << " cells"
+        << (autoDetected ? " (auto-detected)" : "") << nl
         << "  spacing: ("
         << meshSpacing_.x() << ", "
         << meshSpacing_.y() << ", "
@@ -614,11 +636,179 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
         << nl
         << "  spectralZone: "
         << (useZone_ ? spectralZoneName_ : word("none (full mesh)"))
+        << nl
+        << "  overlapWidth: " << overlapWidth_
+        << (overlapWidth_ > 0 ? " (Restricted Additive Schwarz)" : "")
         << endl;
 }
 
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
+
+bool Foam::OGL::OGLSpectralSolver::detectStructuredMesh()
+{
+    const auto& addr = matrix_.lduAddr();
+    const labelUList& owner = addr.lowerAddr();
+    const labelUList& neighbour = addr.upperAddr();
+
+    if (!matrix_.hasUpper())
+    {
+        return false;
+    }
+
+    const scalarField& upper = matrix_.upper();
+    label nCells = matrix_.diag().size();
+
+    // Build histogram: stride -> (sumCoeff, count)
+    std::map<label, std::pair<double, label>> strideHist;
+
+    forAll(owner, facei)
+    {
+        label diff = neighbour[facei] - owner[facei];
+        double val = Foam::mag(upper[facei]);
+        auto& entry = strideHist[diff];
+        entry.first += val;
+        entry.second++;
+    }
+
+    // Sort strides by frequency (descending)
+    std::vector<std::pair<label, label>> stridesByFreq;
+    for (const auto& kv : strideHist)
+    {
+        stridesByFreq.push_back({kv.second.second, kv.first});
+    }
+    std::sort(stridesByFreq.rbegin(), stridesByFreq.rend());
+
+    if (stridesByFreq.size() < 2)
+    {
+        return false;
+    }
+
+    // Verify top strides account for nearly all faces (structured mesh)
+    label totalFaces = owner.size();
+    label topFaces = 0;
+    size_t nDirs = std::min(stridesByFreq.size(), size_t(3));
+    for (size_t i = 0; i < nDirs; i++)
+    {
+        topFaces += stridesByFreq[i].first;
+    }
+
+    if (topFaces < label(0.95 * totalFaces))
+    {
+        WarningInFunction
+            << "Top " << nDirs << " strides account for only "
+            << (100.0 * topFaces / totalFaces)
+            << "% of faces. Mesh is not structured." << endl;
+        return false;
+    }
+
+    // Extract strides sorted by value
+    std::vector<label> topStrides;
+    for (size_t i = 0; i < nDirs; i++)
+    {
+        topStrides.push_back(stridesByFreq[i].second);
+    }
+    std::sort(topStrides.begin(), topStrides.end());
+
+    // Smallest stride must be 1 (x-direction in blockMesh ordering)
+    if (topStrides[0] != 1)
+    {
+        WarningInFunction
+            << "Smallest stride is " << topStrides[0]
+            << " (expected 1). Not a standard structured mesh." << endl;
+        return false;
+    }
+
+    // Infer dimensions: stride_y = nx, stride_z = nx*ny
+    label nx = topStrides[1];
+    label ny, nz;
+
+    if (topStrides.size() >= 3)
+    {
+        label strideZ = topStrides[2];
+        ny = strideZ / nx;
+        nz = nCells / (nx * ny);
+    }
+    else
+    {
+        // 2D case
+        ny = nCells / nx;
+        nz = 1;
+    }
+
+    if (nx * ny * nz != nCells)
+    {
+        WarningInFunction
+            << "Detected " << nx << "x" << ny << "x" << nz
+            << " = " << (nx*ny*nz)
+            << " != " << nCells << " cells" << endl;
+        return false;
+    }
+
+    // Validate face counts match expected structured mesh
+    label expX = (nx - 1) * ny * nz;
+    label expY = nx * (ny - 1) * nz;
+    label expZ = (nz > 1) ? nx * ny * (nz - 1) : 0;
+
+    label actX = strideHist.count(1) ? strideHist[1].second : 0;
+    label actY = strideHist.count(nx) ? strideHist[nx].second : 0;
+    label actZ = (nz > 1 && strideHist.count(nx*ny))
+                 ? strideHist[nx*ny].second : 0;
+
+    if (actX != expX || actY != expY || (nz > 1 && actZ != expZ))
+    {
+        WarningInFunction
+            << "Face count mismatch for " << nx << "x" << ny << "x" << nz
+            << ". Expected (" << expX << "," << expY << "," << expZ << ")"
+            << " got (" << actX << "," << actY << "," << actZ << ")"
+            << endl;
+        return false;
+    }
+
+    fftDimensions_ = Vector<label>(nx, ny, nz);
+
+    // Compute mesh spacing from coupling coefficients.
+    // FV Laplacian: coeffX = dy*dz/dx, coeffY = dx*dz/dy, coeffZ = dx*dy/dz
+    // => dx = sqrt(coeffY*coeffZ), dy = sqrt(coeffX*coeffZ), dz = sqrt(coeffX*coeffY)
+    double meanCoeffX = strideHist[1].first / strideHist[1].second;
+    double meanCoeffY = strideHist[nx].first / strideHist[nx].second;
+
+    if (nz > 1 && strideHist.count(nx*ny) && strideHist[nx*ny].second > 0)
+    {
+        double meanCoeffZ =
+            strideHist[nx*ny].first / strideHist[nx*ny].second;
+
+        meshSpacing_.x() = std::sqrt(meanCoeffY * meanCoeffZ);
+        meshSpacing_.y() = std::sqrt(meanCoeffX * meanCoeffZ);
+        meshSpacing_.z() = std::sqrt(meanCoeffX * meanCoeffY);
+    }
+    else
+    {
+        // 2D: spacing for initial eigenvalues (overridden by updateCoeffs)
+        meshSpacing_ = Vector<scalar>(1.0, 1.0, 1.0);
+    }
+
+    Info<< "OGLSpectral: Auto-detected structured mesh: "
+        << nx << " x " << ny << " x " << nz
+        << " = " << nCells << " cells" << nl
+        << "  spacing: ("
+        << meshSpacing_.x() << ", "
+        << meshSpacing_.y() << ", "
+        << meshSpacing_.z() << ")" << nl
+        << "  mean couplings: x=" << meanCoeffX
+        << " y=" << meanCoeffY;
+
+    if (nz > 1 && strideHist.count(nx*ny))
+    {
+        Info<< " z="
+            << strideHist[nx*ny].first / strideHist[nx*ny].second;
+    }
+
+    Info<< endl;
+
+    return true;
+}
+
 
 void Foam::OGL::OGLSpectralSolver::initZone() const
 {
@@ -683,6 +873,99 @@ void Foam::OGL::OGLSpectralSolver::initZone() const
     Info<< "OGLSpectral: Zone '" << spectralZoneName_ << "': "
         << zoneCellsSorted_.size() << " spectral cells, "
         << nonZoneCells_.size() << " Jacobi cells" << endl;
+
+    // --- Overlap extension for Restricted Additive Schwarz ---
+    if (overlapWidth_ > 0)
+    {
+        // Detect full-mesh structured strides from ldu face addressing
+        const auto& addr = matrix_.lduAddr();
+        const labelUList& owner = addr.lowerAddr();
+        const labelUList& neighbour = addr.upperAddr();
+
+        std::map<label, label> strideCount;
+        forAll(owner, facei)
+        {
+            strideCount[neighbour[facei] - owner[facei]]++;
+        }
+
+        // Sort strides by value, take top 2-3
+        std::vector<label> strides;
+        for (const auto& kv : strideCount)
+        {
+            strides.push_back(kv.first);
+        }
+        std::sort(strides.begin(), strides.end());
+
+        label fullNx = strides[1];
+        label fullNy = (strides.size() >= 3)
+            ? strides[2] / fullNx
+            : nTotalCells / fullNx;
+        label fullNz = nTotalCells / (fullNx * fullNy);
+
+        // Find bounding structured index range of zone cells
+        label ixMin = fullNx, iyMin = fullNy, izMin = fullNz;
+        label ixMax = 0, iyMax = 0, izMax = 0;
+
+        forAll(zoneCellsSorted_, ci)
+        {
+            label c = zoneCellsSorted_[ci];
+            label ix = c % fullNx;
+            label iy = (c / fullNx) % fullNy;
+            label iz = c / (fullNx * fullNy);
+
+            ixMin = min(ixMin, ix); ixMax = max(ixMax, ix);
+            iyMin = min(iyMin, iy); iyMax = max(iyMax, iy);
+            izMin = min(izMin, iz); izMax = max(izMax, iz);
+        }
+
+        // Extend by overlapWidth, clamped to full mesh bounds
+        label exMin = max(label(0), ixMin - overlapWidth_);
+        label exMax = min(fullNx - 1, ixMax + overlapWidth_);
+        label eyMin = max(label(0), iyMin - overlapWidth_);
+        label eyMax = min(fullNy - 1, iyMax + overlapWidth_);
+        label ezMin = max(label(0), izMin - overlapWidth_);
+        label ezMax = min(fullNz - 1, izMax + overlapWidth_);
+
+        label extNx = exMax - exMin + 1;
+        label extNy = eyMax - eyMin + 1;
+        label extNz = ezMax - ezMin + 1;
+
+        extFftDims_ = Vector<label>(extNx, extNy, extNz);
+
+        // Build extended zone cell list and zone-interior mask
+        label extNcells = extNx * extNy * extNz;
+        extendedZoneCells_.setSize(extNcells);
+        extToZoneMap_.setSize(extNcells, -1);
+
+        label idx = 0;
+        for (label iz = ezMin; iz <= ezMax; iz++)
+        {
+            for (label iy = eyMin; iy <= eyMax; iy++)
+            {
+                for (label ix = exMin; ix <= exMax; ix++)
+                {
+                    label globalCell =
+                        ix + fullNx * iy + fullNx * fullNy * iz;
+                    extendedZoneCells_[idx] = globalCell;
+
+                    // Mark zone-interior cells (scatter these back)
+                    if (inZone[globalCell])
+                    {
+                        extToZoneMap_[idx] = 1;
+                    }
+                    idx++;
+                }
+            }
+        }
+
+        Info<< "OGLSpectral: RAS overlap=" << overlapWidth_
+            << ": extended zone "
+            << extNx << "x" << extNy << "x" << extNz
+            << " = " << extNcells << " cells"
+            << " (zone=" << zoneCellsSorted_.size()
+            << " overlap=" << (extNcells - zoneCellsSorted_.size())
+            << ")" << endl;
+    }
 }
 
 
@@ -729,6 +1012,57 @@ void Foam::OGL::OGLSpectralSolver::applyZonePreconditioner
     {
         label c = nonZoneCells_[i];
         z[c] = r[c] / diag[c];
+    }
+}
+
+
+void Foam::OGL::OGLSpectralSolver::applyOverlapAS
+(
+    scalarField& z,
+    const scalarField& r
+) const
+{
+    const scalarField& diag = matrix_.diag();
+
+    // Start with Jacobi preconditioning everywhere.
+    // Zone-interior cells will be overwritten with DCT result.
+    forAll(z, i)
+    {
+        z[i] = r[i] / diag[i];
+    }
+
+    // Gather residual from extended zone cells
+    const label nExt = extendedZoneCells_.size();
+    scalarField extR(nExt);
+    forAll(extendedZoneCells_, i)
+    {
+        extR[i] = r[extendedZoneCells_[i]];
+    }
+
+    // DCT solve on extended zone
+    scalarField extZ(nExt, 0.0);
+    try
+    {
+        if (precisionPolicy_ == PrecisionPolicy::FP64)
+        {
+            applyDCT<double>(extZ, extR, extFftF64_);
+        }
+        else
+        {
+            applyDCT<float>(extZ, extR, extFftF32_);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        OGLExecutor::checkGinkgoError("spectral RAS DCT", e);
+    }
+
+    // Additive Schwarz scatter: write ALL extended zone cells.
+    // This makes M^{-1} = P_ext * DCT^{-1} * P_ext + P_comp * D^{-1} * P_comp
+    // which is SPD (required for CG). Non-extended cells keep Jacobi values.
+    forAll(extendedZoneCells_, i)
+    {
+        z[extendedZoneCells_[i]] = extZ[i];
     }
 }
 
@@ -792,11 +1126,121 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
 
         try
         {
-            if (useZone_)
+            if (useZone_ && overlapWidth_ > 0)
             {
-                // Zone mode: create FFT solver with analytical eigenvalues
-                // (no CSR extraction — zone cells have non-contiguous
-                //  global indices that break the neighbor detection)
+                // RAS mode: create extended FFT solver with extended dims
+                auto exec = OGLExecutor::instance().executor();
+                auto extN = static_cast<gko::size_type>(
+                    extFftDims_.x() * extFftDims_.y() * extFftDims_.z()
+                );
+
+                if (precisionPolicy_ == PrecisionPolicy::FP64)
+                {
+                    extFftF64_ = gko::share(
+                        FFTPreconditioner<double>::create(
+                            exec,
+                            gko::dim<2>{extN, extN},
+                            extFftDims_.x(),
+                            extFftDims_.y(),
+                            extFftDims_.z(),
+                            double(meshSpacing_.x()),
+                            double(meshSpacing_.y()),
+                            double(meshSpacing_.z())
+                        )
+                    );
+                }
+                else
+                {
+                    extFftF32_ = gko::share(
+                        FFTPreconditioner<float>::create(
+                            exec,
+                            gko::dim<2>{extN, extN},
+                            extFftDims_.x(),
+                            extFftDims_.y(),
+                            extFftDims_.z(),
+                            double(meshSpacing_.x()),
+                            double(meshSpacing_.y()),
+                            double(meshSpacing_.z())
+                        )
+                    );
+                }
+
+                // Extract coupling coefficients from faces in extended zone
+                const auto& addr = matrix_.lduAddr();
+                const labelUList& owner = addr.lowerAddr();
+                const labelUList& neighbour = addr.upperAddr();
+                const scalarField& upper = matrix_.upper();
+
+                label nTotal = matrix_.diag().size();
+
+                // Detect full-mesh strides
+                std::map<label, label> strideCount;
+                forAll(owner, facei)
+                {
+                    strideCount[neighbour[facei] - owner[facei]]++;
+                }
+                std::vector<label> strides;
+                for (const auto& kv : strideCount)
+                {
+                    strides.push_back(kv.first);
+                }
+                std::sort(strides.begin(), strides.end());
+                label fullNx = strides[1];
+                label fullNy = (strides.size() >= 3)
+                    ? strides[2] / fullNx
+                    : nTotal / fullNx;
+                int fullNxy = fullNx * fullNy;
+
+                // Build extended zone membership
+                boolList inExt(nTotal, false);
+                forAll(extendedZoneCells_, i)
+                {
+                    inExt[extendedZoneCells_[i]] = true;
+                }
+
+                double sumCX = 0, sumCY = 0, sumCZ = 0;
+                int cntX = 0, cntY = 0, cntZ = 0;
+
+                forAll(owner, facei)
+                {
+                    label o = owner[facei];
+                    label n = neighbour[facei];
+                    if (!inExt[o] || !inExt[n]) continue;
+
+                    int diff = n - o;
+                    double val = Foam::mag(upper[facei]);
+
+                    if (diff == 1) { sumCX += val; cntX++; }
+                    else if (diff == fullNx) { sumCY += val; cntY++; }
+                    else if (diff == fullNxy) { sumCZ += val; cntZ++; }
+                }
+
+                double mCX = (cntX > 0) ? sumCX / cntX : 0;
+                double mCY = (cntY > 0) ? sumCY / cntY : 0;
+                double mCZ = (cntZ > 0) ? sumCZ / cntZ : 0;
+
+                if (debug_ >= 1)
+                {
+                    Info<< "OGLSpectral: RAS extended zone couplings:"
+                        << " coeffX=" << mCX << " (n=" << cntX << ")"
+                        << " coeffY=" << mCY << " (n=" << cntY << ")"
+                        << " coeffZ=" << mCZ << " (n=" << cntZ << ")"
+                        << endl;
+                }
+
+                if (precisionPolicy_ == PrecisionPolicy::FP64)
+                {
+                    extFftF64_->updateCoeffs(mCX, mCY, mCZ);
+                }
+                else
+                {
+                    extFftF32_->updateCoeffs(mCX, mCY, mCZ);
+                }
+            }
+            else if (useZone_)
+            {
+                // Non-overlapping zone: create FFT solver with zone dims,
+                // extract coefficients from ldu faces
                 if (precisionPolicy_ == PrecisionPolicy::FP64)
                 {
                     initFFTSolver(operatorF64_, fftSolverF64_);
@@ -848,7 +1292,11 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
     scalarField qField(nCells);
 
     // z = M^{-1} * r (initial preconditioner application)
-    if (useZone_)
+    if (useZone_ && overlapWidth_ > 0)
+    {
+        applyOverlapAS(zField, rField);
+    }
+    else if (useZone_)
     {
         applyZonePreconditioner(zField, rField);
     }
@@ -916,7 +1364,11 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
 
         // z = M^{-1} * r
         forAll(zField, i) { zField[i] = 0.0; }
-        if (useZone_)
+        if (useZone_ && overlapWidth_ > 0)
+        {
+            applyOverlapAS(zField, rField);
+        }
+        else if (useZone_)
         {
             applyZonePreconditioner(zField, rField);
         }
@@ -969,6 +1421,8 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
         entry.opF64 = operatorF64_;
         entry.fftF32 = fftSolverF32_;
         entry.fftF64 = fftSolverF64_;
+        entry.extFftF32 = extFftF32_;
+        entry.extFftF64 = extFftF64_;
         entry.coeffsInitialized = coeffsInitialized_;
     }
 
