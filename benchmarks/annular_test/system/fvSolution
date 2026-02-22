@@ -1,0 +1,76 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+
+solvers
+{
+    p
+    {
+        solver          OGLCylindrical;
+        tolerance       1e-08;
+        relTol          0.01;
+        OGLCoeffs
+        {
+            precisionPolicy     FP32;
+            iterativeRefinement on;
+            maxRefineIters      50;
+            cacheStructure      true;
+            cacheValues         false;
+            debug               0;
+            cylindricalOrigin   (0 0 0);
+            cylindricalAxis     (0 0 1);
+        }
+    }
+
+    U
+    {
+        solver          smoothSolver;
+        smoother        GaussSeidel;
+        nSweeps         2;
+        tolerance       1e-07;
+        relTol          0.1;
+    }
+
+    k
+    {
+        solver          smoothSolver;
+        smoother        GaussSeidel;
+        nSweeps         2;
+        tolerance       1e-07;
+        relTol          0.1;
+    }
+
+    epsilon
+    {
+        solver          smoothSolver;
+        smoother        GaussSeidel;
+        nSweeps         2;
+        tolerance       1e-07;
+        relTol          0.1;
+    }
+}
+
+SIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+}
+
+relaxationFactors
+{
+    fields
+    {
+        p               0.3;
+    }
+    equations
+    {
+        U               0.5;
+        k               0.5;
+        epsilon         0.5;
+    }
+}

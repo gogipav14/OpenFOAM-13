@@ -48,6 +48,10 @@ class BenchmarkConfig:
     spectral_zone: str = ""       # cellZone name for additive Schwarz (empty = off)
     # Overlap width for Restricted Additive Schwarz (0 = non-overlapping)
     overlap_width: int = 0
+    # Cylindrical solver settings
+    cylindrical_origin: tuple = (0, 0, 0)  # origin of cylindrical coordinates
+    cylindrical_axis: tuple = (0, 0, 1)    # axis of cylindrical coordinates
+    cylindrical_zone: str = ""             # cellZone for cylindrical precond (empty = whole mesh)
 
 
 # Template for OGLPCG solver entry in fvSolution
@@ -103,6 +107,24 @@ OGLSPECTRAL_TEMPLATE = """    {{
             cacheStructure      {cacheStructure};
             cacheValues         {cacheValues};
             debug               {debug};{fftEntries}{zoneEntry}
+        }}
+    }}"""
+
+# Template for OGLCylindrical solver (Fourier-Thomas preconditioned PCG)
+OGLCYLINDRICAL_TEMPLATE = """    {{
+        solver          OGLCylindrical;
+        tolerance       {tolerance};
+        relTol          {relTol};
+        OGLCoeffs
+        {{
+            precisionPolicy     {precisionPolicy};
+            iterativeRefinement {iterativeRefinement};
+            maxRefineIters      {maxRefineIters};
+            cacheStructure      {cacheStructure};
+            cacheValues         {cacheValues};
+            debug               {debug};
+            cylindricalOrigin   ({ox} {oy} {oz});
+            cylindricalAxis     ({ax} {ay} {az});{cylZoneEntry}
         }}
     }}"""
 
@@ -177,6 +199,9 @@ def modify_fvsolution(case_path: Path, variant: str, config: BenchmarkConfig):
         # gpu_spectral_auto: auto-detect mesh dimensions (no fftDimensions/meshSpacing)
         # gpu_spectral_ras: overlapping Schwarz (RAS) with DCT on extended zone
         content = _replace_pressure_solver_spectral(content, config)
+    elif variant == "gpu_cylindrical":
+        # GPU cylindrical solver (Fourier-Thomas preconditioned PCG)
+        content = _replace_pressure_solver_cylindrical(content, config)
     elif variant == "cpu_pcg":
         # Force PCG+DIC for fair Krylov-vs-Krylov comparison
         content = _replace_pressure_solver_cpu(content, config)
@@ -288,6 +313,45 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
                 debug=config.debug_level,
                 fftEntries=fft_entries,
                 zoneEntry=zone_entry,
+            )
+        )
+
+    return content
+
+
+def _replace_pressure_solver_cylindrical(
+    content: str, config: BenchmarkConfig
+) -> str:
+    """Replace pressure solver entries with OGLCylindrical (Fourier-Thomas)."""
+    pressure_fields = [
+        'p_rgh', 'p', 'pcorr', 'pa',
+        'p_rghFinal', 'pFinal', 'pcorrFinal', 'paFinal',
+    ]
+
+    ox, oy, oz = config.cylindrical_origin
+    ax, ay, az = config.cylindrical_axis
+
+    cyl_zone_entry = ""
+    if config.cylindrical_zone:
+        cyl_zone_entry = (
+            f"\n            cylindricalZone     {config.cylindrical_zone};"
+        )
+
+    for pfield in pressure_fields:
+        content = _replace_solver_block(
+            content, pfield,
+            OGLCYLINDRICAL_TEMPLATE.format(
+                tolerance=1e-6,
+                relTol=0.1 if "Final" not in pfield else 0,
+                precisionPolicy=config.precision_policy,
+                iterativeRefinement="on" if config.iterative_refinement else "off",
+                maxRefineIters=max(config.max_refine_iters, 10),
+                cacheStructure="true" if config.cache_structure else "false",
+                cacheValues="true" if config.cache_values else "false",
+                debug=config.debug_level,
+                ox=ox, oy=oy, oz=oz,
+                ax=ax, ay=ay, az=az,
+                cylZoneEntry=cyl_zone_entry,
             )
         )
 
@@ -486,7 +550,7 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
     # For GPU variant, add libs entry for OGL
     if variant in ("gpu", "gpu_mg", "gpu_bicgstab", "gpu_spectral",
                    "gpu_spectral_zone", "gpu_spectral_auto",
-                   "gpu_spectral_ras"):
+                   "gpu_spectral_ras", "gpu_cylindrical"):
         if 'libOGL.so' not in content:
             # Add libs directive before the closing comment or at end
             libs_entry = '\nlibs ("libOGL.so");\n'

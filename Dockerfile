@@ -109,6 +109,17 @@ RUN nvcc -O3 -shared -Xcompiler -fPIC \
     -lcufft \
     && echo "FFT preconditioner CUDA kernels OK"
 
+# ---- Cylindrical FFT+Thomas CUDA kernels ------------------------------------
+# DFT in theta + tridiagonal Thomas solve in r for cylindrical grids.
+RUN nvcc -O3 -shared -Xcompiler -fPIC \
+    -gencode arch=compute_80,code=sm_80 \
+    -gencode arch=compute_89,code=sm_89 \
+    -gencode arch=compute_120,code=sm_120 \
+    -o /opt/ginkgo/lib/libcylprecond.so \
+    /opt/OpenFOAM-13/modules/OGL/src/OGLSolvers/OGLSolverBase/CylFFTKernels.cu \
+    -lcufft \
+    && echo "Cylindrical FFT preconditioner CUDA kernels OK"
+
 # ---- Halo Exchange CUDA kernels ---------------------------------------------
 # GPU gather/scatter kernels for processor-boundary halo exchange.
 # No cuFFT dependency — pure CUDA kernels.

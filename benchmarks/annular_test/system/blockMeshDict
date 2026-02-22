@@ -1,0 +1,185 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+convertToMeters 1.0;
+
+// Simple annular mesh: 16 radial x 96 angular x 1 depth (no blades)
+// 8 sectors of 45 degrees each, 12 angular cells per sector
+
+nRadial     16;
+nAngular    12;   // per sector (total = 8 * 12 = 96)
+
+// Precomputed vertex coordinates
+// rInner=0.02, rOuter=0.1, halfDepth=0.005
+// cos(45)=sin(45)=0.70710678118
+// rOuter*c45 = 0.070710678118
+// rInner*c45 = 0.014142135624
+
+vertices
+(
+    // Back face (z=-0.005), even=outer, odd=inner
+    ( 0.1       0          -0.005)   // v0:  outer at 0
+    ( 0.02      0          -0.005)   // v1:  inner at 0
+    ( 0.070711  0.070711   -0.005)   // v2:  outer at 45
+    ( 0.014142  0.014142   -0.005)   // v3:  inner at 45
+    ( 0         0.1        -0.005)   // v4:  outer at 90
+    ( 0         0.02       -0.005)   // v5:  inner at 90
+    (-0.070711  0.070711   -0.005)   // v6:  outer at 135
+    (-0.014142  0.014142   -0.005)   // v7:  inner at 135
+    (-0.1       0          -0.005)   // v8:  outer at 180
+    (-0.02      0          -0.005)   // v9:  inner at 180
+    (-0.070711 -0.070711   -0.005)   // v10: outer at 225
+    (-0.014142 -0.014142   -0.005)   // v11: inner at 225
+    ( 0        -0.1        -0.005)   // v12: outer at 270
+    ( 0        -0.02       -0.005)   // v13: inner at 270
+    ( 0.070711 -0.070711   -0.005)   // v14: outer at 315
+    ( 0.014142 -0.014142   -0.005)   // v15: inner at 315
+
+    // Front face (z=+0.005), v16-v31
+    ( 0.1       0           0.005)   // v16
+    ( 0.02      0           0.005)   // v17
+    ( 0.070711  0.070711    0.005)   // v18
+    ( 0.014142  0.014142    0.005)   // v19
+    ( 0         0.1         0.005)   // v20
+    ( 0         0.02        0.005)   // v21
+    (-0.070711  0.070711    0.005)   // v22
+    (-0.014142  0.014142    0.005)   // v23
+    (-0.1       0           0.005)   // v24
+    (-0.02      0           0.005)   // v25
+    (-0.070711 -0.070711    0.005)   // v26
+    (-0.014142 -0.014142    0.005)   // v27
+    ( 0        -0.1         0.005)   // v28
+    ( 0        -0.02        0.005)   // v29
+    ( 0.070711 -0.070711    0.005)   // v30
+    ( 0.014142 -0.014142    0.005)   // v31
+);
+
+annularBlock ($nAngular $nRadial 1) simpleGrading (1 1 1);
+
+blocks
+(
+    hex ( 0  2  3  1  16 18 19 17) $annularBlock
+    hex ( 2  4  5  3  18 20 21 19) $annularBlock
+    hex ( 4  6  7  5  20 22 23 21) $annularBlock
+    hex ( 6  8  9  7  22 24 25 23) $annularBlock
+    hex ( 8 10 11  9  24 26 27 25) $annularBlock
+    hex (10 12 13 11  26 28 29 27) $annularBlock
+    hex (12 14 15 13  28 30 31 29) $annularBlock
+    hex (14  0  1 15  30 16 17 31) $annularBlock
+);
+
+arc 45 (0 0 1);
+
+edges
+(
+    // Outer arcs (back)
+    arc  0  2 $arc
+    arc  2  4 $arc
+    arc  4  6 $arc
+    arc  6  8 $arc
+    arc  8 10 $arc
+    arc 10 12 $arc
+    arc 12 14 $arc
+    arc 14  0 $arc
+    // Inner arcs (back)
+    arc  1  3 $arc
+    arc  3  5 $arc
+    arc  5  7 $arc
+    arc  7  9 $arc
+    arc  9 11 $arc
+    arc 11 13 $arc
+    arc 13 15 $arc
+    arc 15  1 $arc
+    // Outer arcs (front)
+    arc 16 18 $arc
+    arc 18 20 $arc
+    arc 20 22 $arc
+    arc 22 24 $arc
+    arc 24 26 $arc
+    arc 26 28 $arc
+    arc 28 30 $arc
+    arc 30 16 $arc
+    // Inner arcs (front)
+    arc 17 19 $arc
+    arc 19 21 $arc
+    arc 21 23 $arc
+    arc 23 25 $arc
+    arc 25 27 $arc
+    arc 27 29 $arc
+    arc 29 31 $arc
+    arc 31 17 $arc
+);
+
+defaultPatch
+{
+    name walls;
+    type wall;
+}
+
+boundary
+(
+    innerWall
+    {
+        type wall;
+        faces
+        (
+            ( 1  3 19 17)
+            ( 3  5 21 19)
+            ( 5  7 23 21)
+            ( 7  9 25 23)
+            ( 9 11 27 25)
+            (11 13 29 27)
+            (13 15 31 29)
+            (15  1 17 31)
+        );
+    }
+    outerWall
+    {
+        type wall;
+        faces
+        (
+            ( 0  2 18 16)
+            ( 2  4 20 18)
+            ( 4  6 22 20)
+            ( 6  8 24 22)
+            ( 8 10 26 24)
+            (10 12 28 26)
+            (12 14 30 28)
+            (14  0 16 30)
+        );
+    }
+    front
+    {
+        type empty;
+        faces
+        (
+            (16 18 19 17)
+            (18 20 21 19)
+            (20 22 23 21)
+            (22 24 25 23)
+            (24 26 27 25)
+            (26 28 29 27)
+            (28 30 31 29)
+            (30 16 17 31)
+        );
+    }
+    back
+    {
+        type empty;
+        faces
+        (
+            ( 0  2  3  1)
+            ( 2  4  5  3)
+            ( 4  6  7  5)
+            ( 6  8  9  7)
+            ( 8 10 11  9)
+            (10 12 13 11)
+            (12 14 15 13)
+            (14  0  1 15)
+        );
+    }
+);
