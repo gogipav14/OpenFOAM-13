@@ -66,7 +66,69 @@ VARIANTS = [
         "variant": "gpu_spectral",
         "needs_fft_dims": True,
     },
+    {
+        "name": "gpu_spectral_zone",
+        "label": "GPU Spectral Zone",
+        "variant": "gpu_spectral_zone",
+        "needs_fft_dims": True,
+        "needs_zone": True,
+    },
 ]
+
+# Zone configuration: cut ZONE_Y_TRIM cells from each end in y
+# This creates a rectangular sub-block for DCT, with Jacobi on the boundary layer.
+#
+# NOTE (Phase 3 finding): ZONE_Y_TRIM > 0 causes PCG divergence because
+# DCT-II encodes Neumann BCs at zone boundaries, but zone-internal boundaries
+# have non-zero pressure gradient coupling to non-zone cells. The Neumann
+# mismatch makes the additive Schwarz preconditioner indefinite.
+# ZONE_Y_TRIM = 0 (zone = full mesh) validates the gather/scatter machinery.
+# For mixed meshes, overlapping Schwarz or Schur complement is needed.
+ZONE_Y_TRIM = 0   # cells to exclude from each y-end (0 = full mesh zone)
+ZONE_NAME = "spectralZone"
+
+
+def create_toposet_dict(case_path: Path, nx: int, ny: int, nz: int) -> tuple:
+    """Create topoSetDict to define a rectangular cellZone for spectral solve.
+
+    Cuts ZONE_Y_TRIM cells from each end in the y-direction, keeping the
+    full x and z extent. Returns (zone_nx, zone_ny, zone_nz).
+    """
+    dy = DOMAIN_Y / ny
+    y_min = ZONE_Y_TRIM * dy
+    y_max = DOMAIN_Y - ZONE_Y_TRIM * dy
+    zone_ny = ny - 2 * ZONE_Y_TRIM
+
+    # Small epsilon to avoid floating-point boundary inclusion issues
+    eps = dy * 0.01
+
+    toposet = case_path / "system" / "topoSetDict"
+    toposet.write_text(f"""FoamFile
+{{
+    format      ascii;
+    class       dictionary;
+    object      topoSetDict;
+}}
+
+actions
+(
+    {{
+        name    {ZONE_NAME}Set;
+        type    cellSet;
+        action  new;
+        source  boxToCell;
+        box     (-1 {y_min + eps:.6f} -1) (1 {y_max - eps:.6f} 1);
+    }}
+    {{
+        name    {ZONE_NAME};
+        type    cellZoneSet;
+        action  new;
+        source  setToCellZone;
+        set     {ZONE_NAME}Set;
+    }}
+);
+""")
+    return (nx, zone_ny, nz)
 
 
 def update_mesh(case_path: Path, nx: int, ny: int, nz: int) -> int:
@@ -124,9 +186,14 @@ def run_variant(
     # Compute FFT dimensions and mesh spacing if needed
     fft_dims = None
     mesh_spacing = None
+    spectral_zone = ""
     if var.get("needs_fft_dims"):
         fft_dims = (nx, ny, nz)
         mesh_spacing = (DOMAIN_X / nx, DOMAIN_Y / ny, DOMAIN_Z / nz)
+
+    # Zone-based spectral: create topoSetDict and adjust FFT dims to zone size
+    if var.get("needs_zone"):
+        spectral_zone = ZONE_NAME
 
     config = BenchmarkConfig(
         max_timesteps=bench_config.max_timesteps,
@@ -142,6 +209,7 @@ def run_variant(
         block_size=var.get("block_size", 4),
         fft_dimensions=fft_dims,
         mesh_spacing=mesh_spacing,
+        spectral_zone=spectral_zone,
     )
 
     print(f"    Preparing {var_name}...")
@@ -152,6 +220,22 @@ def run_variant(
         actual_cells = update_mesh(var_dir, nx, ny, nz)
     else:
         actual_cells = nx * ny * nz
+
+    # Zone: create topoSetDict and patch fftDimensions in fvSolution to zone size
+    if var.get("needs_zone"):
+        zone_nx, zone_ny, zone_nz = create_toposet_dict(var_dir, nx, ny, nz)
+        zone_cells = zone_nx * zone_ny * zone_nz
+        print(f"    Zone: {zone_nx}x{zone_ny}x{zone_nz} = {zone_cells:,} / "
+              f"{actual_cells:,} cells ({100*zone_cells/actual_cells:.0f}%)")
+        # Patch the fftDimensions in fvSolution to match zone size, not full mesh
+        fvsolution = var_dir / "system" / "fvSolution"
+        fvs_content = fvsolution.read_text()
+        fvs_content = re.sub(
+            rf'fftDimensions\s+\(\s*{nx}\s+{ny}\s+{nz}\s*\)',
+            f'fftDimensions       ({zone_nx} {zone_ny} {zone_nz})',
+            fvs_content,
+        )
+        fvsolution.write_text(fvs_content)
 
     # Set nCorrectors to increase pressure solve count per step
     if n_correctors > 0:

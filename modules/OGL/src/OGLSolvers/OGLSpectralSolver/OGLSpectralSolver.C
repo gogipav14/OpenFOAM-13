@@ -28,6 +28,7 @@ License
 #include "FP32CastWrapper.H"
 #include "HaloKernels.h"
 #include "addToRunTimeSelectionTable.H"
+#include "polyMesh.H"
 
 #include <chrono>
 #include <cmath>
@@ -122,6 +123,86 @@ void Foam::OGL::OGLSpectralSolver::initFFTSolver
                 double(meshSpacing_.z())
             )
         );
+    }
+
+    // In zone mode, extract coupling coefficients directly from lduMatrix
+    // face addressing (not from CSR). The zone cells have non-contiguous
+    // global indices, so the CSR neighbor detection would need full-mesh
+    // strides rather than zone dimensions. The ldu approach is simpler.
+    if (useZone_)
+    {
+        const auto& addr = matrix_.lduAddr();
+        const labelUList& owner = addr.lowerAddr();
+        const labelUList& neighbour = addr.upperAddr();
+        const scalarField& upper = matrix_.upper();
+
+        // Detect full-mesh strides from cell count + zone dimensions.
+        // Assumes x and z dimensions match between zone and full mesh
+        // (zone trims only in y for now).
+        int fullNx = fftDimensions_.x();
+        int fullNz = fftDimensions_.z();
+        label nTotalCells = matrix_.diag().size();
+        int fullNy = nTotalCells / (fullNx * fullNz);
+        int fullNxy = fullNx * fullNy;
+
+        // Build zone membership lookup for face filtering
+        boolList inZone(nTotalCells, false);
+        forAll(zoneCellsSorted_, i)
+        {
+            inZone[zoneCellsSorted_[i]] = true;
+        }
+
+        double sumCoeffX = 0, sumCoeffY = 0, sumCoeffZ = 0;
+        int countX = 0, countY = 0, countZ = 0;
+
+        forAll(owner, facei)
+        {
+            label o = owner[facei];
+            label n = neighbour[facei];
+
+            // Only count zone-internal faces (both cells in zone)
+            if (!inZone[o] || !inZone[n]) continue;
+
+            int diff = n - o;  // always positive (neighbour > owner)
+            double val = Foam::mag(upper[facei]);
+
+            if (diff == 1)
+            {
+                sumCoeffX += val;
+                countX++;
+            }
+            else if (diff == fullNx)
+            {
+                sumCoeffY += val;
+                countY++;
+            }
+            else if (diff == fullNxy)
+            {
+                sumCoeffZ += val;
+                countZ++;
+            }
+        }
+
+        double meanCoeffX = (countX > 0) ? sumCoeffX / countX : 0;
+        double meanCoeffY = (countY > 0) ? sumCoeffY / countY : 0;
+        double meanCoeffZ = (countZ > 0) ? sumCoeffZ / countZ : 0;
+
+        if (debug_ >= 1)
+        {
+            Info<< "OGLSpectral: zone ldu couplings:"
+                << " coeffX=" << meanCoeffX
+                << " (n=" << countX << ")"
+                << " coeffY=" << meanCoeffY
+                << " (n=" << countY << ")"
+                << " coeffZ=" << meanCoeffZ
+                << " (n=" << countZ << ")"
+                << " (fullMesh: " << fullNx
+                << "x" << fullNy << "x" << fullNz << ")"
+                << endl;
+        }
+
+        fftSolver->updateCoeffs(meanCoeffX, meanCoeffY, meanCoeffZ);
+        return;
     }
 
     // Extract mean coupling coefficients from the CSR matrix and update
@@ -419,7 +500,10 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
     operatorF64_(nullptr),
     fftSolverF32_(nullptr),
     fftSolverF64_(nullptr),
-    coeffsInitialized_(false)
+    coeffsInitialized_(false),
+    spectralZoneName_(),
+    useZone_(false),
+    zoneInitialized_(false)
 {
     // Default to more refinement iterations than base class (3).
     // The spectral solver needs ~5-7 iterations to drive boundary rAU
@@ -451,6 +535,11 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
         if (oglDict.found("meshSpacing"))
         {
             meshSpacing_ = oglDict.lookup<Vector<scalar>>("meshSpacing");
+        }
+        if (oglDict.found("spectralZone"))
+        {
+            spectralZoneName_ = oglDict.lookup<word>("spectralZone");
+            useZone_ = true;
         }
     }
 
@@ -522,11 +611,127 @@ Foam::OGL::OGLSpectralSolver::OGLSpectralSolver
             precisionPolicy_ == PrecisionPolicy::FP32 ? "FP32" : "MIXED")
         << nl
         << "  iterativeRefinement: " << iterativeRefinement_
+        << nl
+        << "  spectralZone: "
+        << (useZone_ ? spectralZoneName_ : word("none (full mesh)"))
         << endl;
 }
 
 
 // * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * * //
+
+void Foam::OGL::OGLSpectralSolver::initZone() const
+{
+    // The lduMesh interface gives us access to cellZones via the fvMesh
+    const auto& meshRef = matrix().mesh();
+
+    // Find zone by name via the objectRegistry/polyMesh interface
+    const auto& cellZones =
+        dynamic_cast<const polyMesh&>(meshRef).cellZones();
+
+    label zoneID = cellZones.findIndex(spectralZoneName_);
+    if (zoneID < 0)
+    {
+        FatalErrorInFunction
+            << "cellZone '" << spectralZoneName_ << "' not found"
+            << abort(FatalError);
+    }
+
+    const labelList& zoneCells = cellZones[zoneID];
+
+    // Sort for correct (i,j,k) DCT ordering — blockMesh numbers cells
+    // as i + nx*j + nx*ny*k, so sorted global indices give the local
+    // (i',j',k') ordering that the DCT expects.
+    zoneCellsSorted_ = zoneCells;
+    sort(zoneCellsSorted_);
+
+    // Build non-zone cell list
+    // lduMatrix size gives the number of cells (rows)
+    label nTotalCells = matrix_.diag().size();
+    boolList inZone(nTotalCells, false);
+    forAll(zoneCellsSorted_, i)
+    {
+        inZone[zoneCellsSorted_[i]] = true;
+    }
+
+    nonZoneCells_.setSize(nTotalCells - zoneCellsSorted_.size());
+    label j = 0;
+    forAll(inZone, celli)
+    {
+        if (!inZone[celli])
+        {
+            nonZoneCells_[j++] = celli;
+        }
+    }
+
+    // Validate zone size matches FFT dimensions
+    label expectedZoneCells =
+        fftDimensions_.x() * fftDimensions_.y() * fftDimensions_.z();
+
+    if (zoneCellsSorted_.size() != expectedZoneCells)
+    {
+        FatalErrorInFunction
+            << "cellZone '" << spectralZoneName_ << "' has "
+            << zoneCellsSorted_.size() << " cells, but fftDimensions "
+            << fftDimensions_ << " requires "
+            << expectedZoneCells << " cells"
+            << abort(FatalError);
+    }
+
+    zoneInitialized_ = true;
+
+    Info<< "OGLSpectral: Zone '" << spectralZoneName_ << "': "
+        << zoneCellsSorted_.size() << " spectral cells, "
+        << nonZoneCells_.size() << " Jacobi cells" << endl;
+}
+
+
+void Foam::OGL::OGLSpectralSolver::applyZonePreconditioner
+(
+    scalarField& z,
+    const scalarField& r
+) const
+{
+    const label nZone = zoneCellsSorted_.size();
+
+    // --- Zone cells: gather → DCT → scatter ---
+    scalarField zoneR(nZone);
+    forAll(zoneCellsSorted_, i)
+    {
+        zoneR[i] = r[zoneCellsSorted_[i]];
+    }
+
+    scalarField zoneZ(nZone, 0.0);
+    try
+    {
+        if (precisionPolicy_ == PrecisionPolicy::FP64)
+        {
+            applyDCT<double>(zoneZ, zoneR, fftSolverF64_);
+        }
+        else
+        {
+            applyDCT<float>(zoneZ, zoneR, fftSolverF32_);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        OGLExecutor::checkGinkgoError("spectral zone DCT", e);
+    }
+
+    forAll(zoneCellsSorted_, i)
+    {
+        z[zoneCellsSorted_[i]] = zoneZ[i];
+    }
+
+    // --- Non-zone cells: diagonal (Jacobi) preconditioning ---
+    const scalarField& diag = matrix_.diag();
+    forAll(nonZoneCells_, i)
+    {
+        label c = nonZoneCells_[i];
+        z[c] = r[c] / diag[c];
+    }
+}
+
 
 Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
 (
@@ -571,31 +776,49 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
         return solverPerf;
     }
 
-    // --- Setup phase: extract mean CSR couplings from the assembled
-    //     pressure matrix to calibrate DCT eigenvalues.
-    //
-    //     Only done ONCE per field — the mean coupling coefficients
-    //     change negligibly between timesteps/PISO corrections (the
-    //     mesh geometry is constant and rAU variation is small on
-    //     structured grids). PCG handles the remaining approximation.
-    //
-    //     This eliminates the GPU->CPU CSR copy + CPU mean computation
-    //     that previously dominated solve time at large mesh sizes.
+    // --- Zone initialization (once)
+    if (useZone_ && !zoneInitialized_)
+    {
+        initZone();
+    }
+
+    // --- Setup phase: create FFT solver and calibrate eigenvalues.
+    //     In full-mesh mode, extracts mean CSR couplings from the pressure
+    //     matrix. In zone mode, uses analytical eigenvalues from spacing.
+    //     Only done ONCE per field — cached for subsequent solves.
     if (!coeffsInitialized_)
     {
         auto setupStart = std::chrono::high_resolution_clock::now();
 
         try
         {
-            if (precisionPolicy_ == PrecisionPolicy::FP64)
+            if (useZone_)
             {
-                ensureOperator(operatorF64_);
-                initFFTSolver(operatorF64_, fftSolverF64_);
+                // Zone mode: create FFT solver with analytical eigenvalues
+                // (no CSR extraction — zone cells have non-contiguous
+                //  global indices that break the neighbor detection)
+                if (precisionPolicy_ == PrecisionPolicy::FP64)
+                {
+                    initFFTSolver(operatorF64_, fftSolverF64_);
+                }
+                else
+                {
+                    initFFTSolver(operatorF32_, fftSolverF32_);
+                }
             }
             else
             {
-                ensureOperator(operatorF32_);
-                initFFTSolver(operatorF32_, fftSolverF32_);
+                // Full-mesh mode: extract CSR coupling coefficients
+                if (precisionPolicy_ == PrecisionPolicy::FP64)
+                {
+                    ensureOperator(operatorF64_);
+                    initFFTSolver(operatorF64_, fftSolverF64_);
+                }
+                else
+                {
+                    ensureOperator(operatorF32_);
+                    initFFTSolver(operatorF32_, fftSolverF32_);
+                }
             }
             coeffsInitialized_ = true;
         }
@@ -625,20 +848,27 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
     scalarField qField(nCells);
 
     // z = M^{-1} * r (initial preconditioner application)
-    try
+    if (useZone_)
     {
-        if (precisionPolicy_ == PrecisionPolicy::FP64)
-        {
-            applyDCT<double>(zField, rField, fftSolverF64_);
-        }
-        else
-        {
-            applyDCT<float>(zField, rField, fftSolverF32_);
-        }
+        applyZonePreconditioner(zField, rField);
     }
-    catch (const std::exception& e)
+    else
     {
-        OGLExecutor::checkGinkgoError("spectral PCG init", e);
+        try
+        {
+            if (precisionPolicy_ == PrecisionPolicy::FP64)
+            {
+                applyDCT<double>(zField, rField, fftSolverF64_);
+            }
+            else
+            {
+                applyDCT<float>(zField, rField, fftSolverF32_);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            OGLExecutor::checkGinkgoError("spectral PCG init", e);
+        }
     }
 
     // p = z
@@ -686,20 +916,27 @@ Foam::solverPerformance Foam::OGL::OGLSpectralSolver::solve
 
         // z = M^{-1} * r
         forAll(zField, i) { zField[i] = 0.0; }
-        try
+        if (useZone_)
         {
-            if (precisionPolicy_ == PrecisionPolicy::FP64)
-            {
-                applyDCT<double>(zField, rField, fftSolverF64_);
-            }
-            else
-            {
-                applyDCT<float>(zField, rField, fftSolverF32_);
-            }
+            applyZonePreconditioner(zField, rField);
         }
-        catch (const std::exception& e)
+        else
         {
-            OGLExecutor::checkGinkgoError("spectral PCG precond", e);
+            try
+            {
+                if (precisionPolicy_ == PrecisionPolicy::FP64)
+                {
+                    applyDCT<double>(zField, rField, fftSolverF64_);
+                }
+                else
+                {
+                    applyDCT<float>(zField, rField, fftSolverF32_);
+                }
+            }
+            catch (const std::exception& e)
+            {
+                OGLExecutor::checkGinkgoError("spectral PCG precond", e);
+            }
         }
 
         // beta = (r_new, z_new) / (r_old, z_old)

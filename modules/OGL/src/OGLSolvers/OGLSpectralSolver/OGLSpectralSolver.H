@@ -25,24 +25,19 @@ Class
     Foam::OGL::OGLSpectralSolver
 
 Description
-    GPU-accelerated spectral direct solver for the pressure Poisson equation
-    on structured Cartesian grids.
+    GPU-accelerated spectral pressure solver with optional zone-based
+    additive Schwarz domain decomposition.
 
-    Instead of iterating a Krylov solver (CG) with an FFT preconditioner,
-    this solver applies the DCT-II diagonalization of the discrete Laplacian
-    as a DIRECT solve:
+    PCG solver using DCT-II preconditioner via cuFFT. For the constant-
+    coefficient Laplacian on a uniform Cartesian grid with Neumann BCs,
+    the DCT diagonalization is exact. For variable coefficients (rAU from
+    momentum), PCG iterates to correct the discrepancy.
 
-        p = IDCT( DCT(f) ./ eigenvalues )
-
-    in O(N log N) via cuFFT. For the constant-coefficient Laplacian on a
-    uniform Cartesian grid with Neumann BCs, this is exact. For the actual
-    FV pressure operator (which includes variable rAU from momentum), the
-    DCT inverse is approximate — the outer iterative refinement loop in
-    OGLSolverBase corrects the discrepancy.
-
-    The key insight: Chebyshev polynomials are the DCT under change of
-    variable (T_k(cos(theta)) = cos(k*theta)), so the DCT diagonalization
-    IS a spectral Galerkin solve in the Chebyshev-Fourier basis.
+    Zone decomposition (Phase 3):
+    When spectralZone is specified, the DCT is applied only to cells in
+    the named cellZone (the "structured" region). Non-zone cells receive
+    diagonal (Jacobi) preconditioning. This is an additive Schwarz
+    preconditioner where PCG handles the zone boundary coupling.
 
     Configuration example:
     \verbatim
@@ -56,11 +51,14 @@ Description
 
             OGLCoeffs
             {
-                precisionPolicy     FP64;
+                precisionPolicy     FP32;
                 iterativeRefinement on;
-                maxRefineIters      3;
+                maxRefineIters      10;
                 fftDimensions       (200 200 1);
                 meshSpacing         (0.005 0.005 0.01);
+
+                // Optional: zone-based domain decomposition
+                // spectralZone    innerRegion;
             }
         }
     }
@@ -137,7 +135,36 @@ class OGLSpectralSolver
         mutable bool coeffsInitialized_;
 
 
+    // Zone decomposition data (additive Schwarz)
+
+        //- Name of the cellZone for spectral preconditioning (empty = off)
+        word spectralZoneName_;
+
+        //- Whether zone decomposition is active
+        bool useZone_;
+
+        //- Sorted zone cell indices (DCT ordering = sorted blockMesh order)
+        mutable labelList zoneCellsSorted_;
+
+        //- Non-zone cell indices (receive Jacobi preconditioning)
+        mutable labelList nonZoneCells_;
+
+        //- Whether zone mappings have been initialized
+        mutable bool zoneInitialized_;
+
+
     // Private Member Functions
+
+        //- Initialize zone cell mappings from the mesh cellZone
+        void initZone() const;
+
+        //- Apply zone-based additive Schwarz preconditioner:
+        //  zone cells get DCT, non-zone cells get Jacobi
+        void applyZonePreconditioner
+        (
+            scalarField& z,
+            const scalarField& r
+        ) const;
 
         //- Ensure the FoamGinkgoLinOp exists and has current values
         template<typename ValueType>

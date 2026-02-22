@@ -44,6 +44,8 @@ class BenchmarkConfig:
     mg_cache_max_iters: int = 200  # force rebuild if iters exceed this
     # CFL conditioning (always enforced for transient cases)
     max_courant: float = 0.5      # Maximum Courant number (0 = disabled)
+    # Zone-based spectral decomposition (Phase 3)
+    spectral_zone: str = ""       # cellZone name for additive Schwarz (empty = off)
 
 
 # Template for OGLPCG solver entry in fvSolution
@@ -99,7 +101,7 @@ OGLSPECTRAL_TEMPLATE = """    {{
             cacheValues         {cacheValues};
             debug               {debug};
             fftDimensions       ({fft_nx} {fft_ny} {fft_nz});
-            meshSpacing         ({dx} {dy} {dz});
+            meshSpacing         ({dx} {dy} {dz});{zoneEntry}
         }}
     }}"""
 
@@ -167,8 +169,9 @@ def modify_fvsolution(case_path: Path, variant: str, config: BenchmarkConfig):
         # GPU pressure (OGLPCG) + GPU momentum (OGLBiCGStab)
         content = _replace_pressure_solver_gpu(content, config)
         content = _replace_momentum_solver_gpu(content, config)
-    elif variant == "gpu_spectral":
+    elif variant in ("gpu_spectral", "gpu_spectral_zone"):
         # GPU spectral direct solver (DCT-based, no Krylov iteration)
+        # gpu_spectral_zone: zone-based additive Schwarz (DCT on zone, Jacobi outside)
         content = _replace_pressure_solver_spectral(content, config)
     elif variant == "cpu_pcg":
         # Force PCG+DIC for fair Krylov-vs-Krylov comparison
@@ -254,6 +257,11 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
     # and Richardson iteration converges as rho^k (rho ~ 0.15).
     spectral_max_iters = max(config.max_refine_iters, 10)
 
+    # Optional zone entry for additive Schwarz decomposition
+    zone_entry = ""
+    if hasattr(config, 'spectral_zone') and config.spectral_zone:
+        zone_entry = f"\n            spectralZone    {config.spectral_zone};"
+
     for pfield in pressure_fields:
         content = _replace_solver_block(
             content, pfield,
@@ -268,6 +276,7 @@ def _replace_pressure_solver_spectral(content: str, config: BenchmarkConfig) -> 
                 debug=config.debug_level,
                 fft_nx=nx, fft_ny=ny, fft_nz=nz,
                 dx=dx, dy=dy, dz=dz,
+                zoneEntry=zone_entry,
             )
         )
 
@@ -464,7 +473,7 @@ def modify_controldict(case_path: Path, variant: str, config: BenchmarkConfig):
     content = controldict.read_text()
 
     # For GPU variant, add libs entry for OGL
-    if variant in ("gpu", "gpu_mg", "gpu_bicgstab", "gpu_spectral"):
+    if variant in ("gpu", "gpu_mg", "gpu_bicgstab", "gpu_spectral", "gpu_spectral_zone"):
         if 'libOGL.so' not in content:
             # Add libs directive before the closing comment or at end
             libs_entry = '\nlibs ("libOGL.so");\n'
