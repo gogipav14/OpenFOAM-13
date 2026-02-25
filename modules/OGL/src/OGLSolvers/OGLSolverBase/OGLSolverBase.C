@@ -157,13 +157,37 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
         {
             preconditionerType_ = PreconditionerType::FFT;
         }
+        else if (precondStr == "FFT_DIRECT")
+        {
+            preconditionerType_ = PreconditionerType::FFT_DIRECT;
+        }
         else if (precondStr == "fftBlockJacobi")
         {
             preconditionerType_ = PreconditionerType::FFT_BLOCK_JACOBI;
         }
+        else if (precondStr == "fftChebyshev")
+        {
+            preconditionerType_ = PreconditionerType::FFT_CHEBYSHEV;
+        }
+        else if (precondStr == "fftScaled")
+        {
+            preconditionerType_ = PreconditionerType::FFT_SCALED;
+        }
+        else if (precondStr == "fftBjVcycle")
+        {
+            preconditionerType_ = PreconditionerType::FFT_BJ_VCYCLE;
+        }
+        else if (precondStr == "geometricMgFft")
+        {
+            preconditionerType_ = PreconditionerType::GEOMETRIC_MG_FFT;
+        }
         else if (precondStr == "multigrid")
         {
             preconditionerType_ = PreconditionerType::MULTIGRID;
+        }
+        else if (precondStr == "multigridFFT")
+        {
+            preconditionerType_ = PreconditionerType::MULTIGRID_FFT;
         }
         else if (precondStr == "ILU")
         {
@@ -176,7 +200,8 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
                 << "Valid options: Jacobi, blockJacobi, ISAI, "
                 << "blockJacobiISAI, bjIsaiSandwich, bjIsaiAdditive, "
                 << "bjIsaiGmres, bjIsaiInnerOuter, FFT, fftBlockJacobi, "
-                << "multigrid, ILU"
+                << "fftChebyshev, fftScaled, fftBjVcycle, "
+                << "geometricMgFft, multigrid, multigridFFT, ILU"
                 << abort(FatalIOError);
         }
 
@@ -192,7 +217,13 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
         if
         (
             preconditionerType_ == PreconditionerType::FFT
+         || preconditionerType_ == PreconditionerType::FFT_DIRECT
          || preconditionerType_ == PreconditionerType::FFT_BLOCK_JACOBI
+         || preconditionerType_ == PreconditionerType::FFT_CHEBYSHEV
+         || preconditionerType_ == PreconditionerType::FFT_SCALED
+         || preconditionerType_ == PreconditionerType::FFT_BJ_VCYCLE
+         || preconditionerType_ == PreconditionerType::GEOMETRIC_MG_FFT
+         || preconditionerType_ == PreconditionerType::MULTIGRID_FFT
         )
         {
             fftDimensions_ = oglDict.lookup<Vector<label>>("fftDimensions");
@@ -212,8 +243,102 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
             }
         }
 
+        // V-cycle smoother settings
+        if (preconditionerType_ == PreconditionerType::FFT_BJ_VCYCLE)
+        {
+            vcyclePreSmooth_ = oglDict.lookupOrDefault<label>
+            (
+                "vcyclePreSmooth", 1
+            );
+            vcyclePostSmooth_ = oglDict.lookupOrDefault<label>
+            (
+                "vcyclePostSmooth", 1
+            );
+
+            if (vcyclePreSmooth_ != vcyclePostSmooth_)
+            {
+                WarningInFunction
+                    << "vcyclePreSmooth (" << vcyclePreSmooth_
+                    << ") != vcyclePostSmooth (" << vcyclePostSmooth_
+                    << "). Asymmetric V-cycle breaks CG symmetry."
+                    << " Using GMRES would be required." << endl;
+            }
+
+            if (debug_ >= 1)
+            {
+                Info<< "    V-cycle: preSmooth=" << vcyclePreSmooth_
+                    << " postSmooth=" << vcyclePostSmooth_ << endl;
+            }
+        }
+
+        // Geometric MG + FFT settings
+        if (preconditionerType_ == PreconditionerType::GEOMETRIC_MG_FFT)
+        {
+            vcyclePreSmooth_ = oglDict.lookupOrDefault<label>
+            (
+                "vcyclePreSmooth", 1
+            );
+            vcyclePostSmooth_ = oglDict.lookupOrDefault<label>
+            (
+                "vcyclePostSmooth", 1
+            );
+            vcycleChebDegree_ = oglDict.lookupOrDefault<label>
+            (
+                "vcycleChebDegree", 2
+            );
+            vcycleSmoother_ = oglDict.lookupOrDefault<word>
+            (
+                "vcycleSmoother", "chebyshev"
+            );
+
+            if (vcyclePreSmooth_ != vcyclePostSmooth_)
+            {
+                WarningInFunction
+                    << "vcyclePreSmooth (" << vcyclePreSmooth_
+                    << ") != vcyclePostSmooth (" << vcyclePostSmooth_
+                    << "). Asymmetric V-cycle breaks CG symmetry."
+                    << " Using GMRES would be required." << endl;
+            }
+
+            if (debug_ >= 1)
+            {
+                Info<< "    GeometricMG: preSmooth=" << vcyclePreSmooth_
+                    << " postSmooth=" << vcyclePostSmooth_
+                    << " smoother=" << vcycleSmoother_
+                    << " chebDegree=" << vcycleChebDegree_ << endl;
+            }
+        }
+
+        // Chebyshev-FFT preconditioner settings
+        if (preconditionerType_ == PreconditionerType::FFT_CHEBYSHEV)
+        {
+            chebyDegree_ = oglDict.lookupOrDefault<label>
+            (
+                "chebyDegree", 3
+            );
+            chebyEigMin_ = oglDict.lookupOrDefault<scalar>
+            (
+                "chebyEigMin", 0.1
+            );
+            chebyEigMax_ = oglDict.lookupOrDefault<scalar>
+            (
+                "chebyEigMax", 4.0
+            );
+
+            if (debug_ >= 1)
+            {
+                Info<< "    Chebyshev-FFT: degree=" << chebyDegree_
+                    << " foci=[" << chebyEigMin_ << ", "
+                    << chebyEigMax_ << "]" << endl;
+            }
+        }
+
         // Multigrid preconditioner settings
-        if (preconditionerType_ == PreconditionerType::MULTIGRID)
+        if
+        (
+            preconditionerType_ == PreconditionerType::MULTIGRID
+         || preconditionerType_ == PreconditionerType::MULTIGRID_FFT
+        )
         {
             mgMaxLevels_ = oglDict.lookupOrDefault<label>
             (
@@ -539,6 +664,13 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     preconditionerType_(PreconditionerType::JACOBI),
     blockSize_(4),
     isaiSparsityPower_(1),
+    chebyDegree_(3),
+    chebyEigMin_(0.1),
+    chebyEigMax_(4.0),
+    vcyclePreSmooth_(1),
+    vcyclePostSmooth_(1),
+    vcycleChebDegree_(2),
+    vcycleSmoother_("chebyshev"),
     fftDimensions_(0, 0, 0),
     meshSpacing_(0, 0, 0),
     mgMaxLevels_(10),

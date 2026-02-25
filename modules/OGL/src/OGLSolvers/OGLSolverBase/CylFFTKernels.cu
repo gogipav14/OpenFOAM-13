@@ -79,6 +79,18 @@ struct CylFFTPrecondState
     // Work buffer: real data (copy of input for in-place FFT)
     // Size: nr * ntheta * sizeof(real)
     void* realBuf;
+
+    // --- Per-sector DCT mode ---
+    // When sectorMode=true, the FFT operates on mirrored (2N) data instead
+    // of the raw (N=nthetaSector) data.  The cuFFT plans use length 2N with
+    // batch = nr*nSectors.  The mirror symmetry ensures the FFT output
+    // encodes DCT-II coefficients (Neumann BCs).
+    bool sectorMode;
+    int nSectors;       // number of angular sectors
+    int nthetaSector;   // angular cells per sector (= N)
+    // For sector mode: nModes = nthetaSector + 1, FFT length = 2*nthetaSector
+    // realBuf sized: batch * 2*nthetaSector (mirror data)
+    // complexBuf sized: batch * nModes
 };
 
 
@@ -155,6 +167,45 @@ __global__ void scaleKernel(T* data, T scale, int n)
 }
 
 
+// ---- DCT mirror/extract kernels -------------------------------------------
+
+// Mirror input for DCT-II via FFT:
+// Given x[0..N-1] per batch, produce y[0..2N-1] where y[k]=x[k], y[2N-1-k]=x[k].
+// This even-symmetric extension makes the DFT encode DCT-II coefficients.
+template<typename T>
+__global__ void mirrorForDCTKernel(
+    const T* __restrict__ input,   // [totalBatch * N]
+    T*       __restrict__ output,  // [totalBatch * 2N]
+    int N, int totalElements       // totalElements = totalBatch * N
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= totalElements) return;
+    int b = idx / N;
+    int n = idx % N;
+    T val = input[idx];
+    output[b * 2 * N + n] = val;
+    output[b * 2 * N + (2 * N - 1 - n)] = val;
+}
+
+
+// Extract first N elements from each 2N-length batch and apply scale.
+template<typename T>
+__global__ void extractScaleKernel(
+    const T* __restrict__ input,   // [totalBatch * 2N]
+    T*       __restrict__ output,  // [totalBatch * N]
+    T scale,
+    int N, int totalElements       // totalElements = totalBatch * N
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= totalElements) return;
+    int b = idx / N;
+    int n = idx % N;
+    output[idx] = input[b * 2 * N + n] * scale;
+}
+
+
 // ---- C API implementation --------------------------------------------------
 
 extern "C"
@@ -169,6 +220,9 @@ CylFFTHandle cylFFTPrecondCreate(
     s->nModes = ntheta / 2 + 1;
     s->totalCells = nr * ntheta;
     s->useFloat = useFloat;
+    s->sectorMode = false;
+    s->nSectors = 0;
+    s->nthetaSector = 0;
 
     // Initialize pointers
     s->thomasL_f = nullptr;
@@ -504,4 +558,356 @@ void cylFFTPrecondApplyDouble(
 
     cudaMemcpy(x_ptr, realBuf, totalCells * sizeof(double),
                cudaMemcpyDeviceToDevice);
+}
+
+
+// ---- Per-sector DCT C API -------------------------------------------------
+
+// The key insight: for an even-symmetric mirror extension y[n]=x[n],
+// y[2N-1-n]=x[n], the DFT satisfies Y[k] = 2*exp(j*pi*k/(2N))*DCT[k].
+// Since Thomas is linear, we can apply Thomas directly on the complex Y[k]
+// without extracting/injecting DCT coefficients.  The only differences from
+// the DFT path are: (1) mirror input, (2) DCT eigenvalues in Thomas,
+// (3) extract first N elements and scale by 1/(2N).
+
+extern "C"
+CylFFTHandle cylFFTPrecondCreateSector(
+    int nr, int nSectors, int nthetaSector,
+    int useFloat
+)
+{
+    auto* s = new CylFFTPrecondState;
+    s->sectorMode = true;
+    s->nr = nr;
+    s->nSectors = nSectors;
+    s->nthetaSector = nthetaSector;
+    s->ntheta = nSectors * nthetaSector;  // total angular cells
+    s->totalCells = nr * nSectors * nthetaSector;
+    s->useFloat = useFloat;
+
+    // FFT operates on mirrored data of length 2*nthetaSector
+    int fftLen = 2 * nthetaSector;
+    s->nModes = nthetaSector + 1;  // R2C output: fftLen/2 + 1
+
+    int batch = nr * nSectors;
+
+    // Initialize pointers
+    s->thomasL_f = nullptr;
+    s->thomasD_f = nullptr;
+    s->thomasU_f = nullptr;
+    s->thomasL_d = nullptr;
+    s->thomasD_d = nullptr;
+    s->thomasU_d = nullptr;
+    s->complexBuf = nullptr;
+    s->realBuf = nullptr;
+
+    // Create cuFFT plans: batched 1D R2C/C2R of length 2*nthetaSector
+    int n[] = {fftLen};
+    int inembed[] = {fftLen};
+    int onembed[] = {s->nModes};
+
+    if (useFloat)
+    {
+        cufftResult res = cufftPlanMany(
+            &s->planR2C_f, 1, n,
+            inembed, 1, fftLen,       // input: stride=1, dist=fftLen
+            onembed, 1, s->nModes,    // output: stride=1, dist=nModes
+            CUFFT_R2C, batch
+        );
+        if (res != CUFFT_SUCCESS)
+        {
+            fprintf(stderr, "CylFFT Sector: R2C plan failed: %d\n", res);
+            delete s;
+            return nullptr;
+        }
+
+        res = cufftPlanMany(
+            &s->planC2R_f, 1, n,
+            onembed, 1, s->nModes,
+            inembed, 1, fftLen,
+            CUFFT_C2R, batch
+        );
+        if (res != CUFFT_SUCCESS)
+        {
+            fprintf(stderr, "CylFFT Sector: C2R plan failed: %d\n", res);
+            cufftDestroy(s->planR2C_f);
+            delete s;
+            return nullptr;
+        }
+
+        // Allocate work buffers for mirrored (2N) data
+        cudaMalloc(&s->realBuf, batch * fftLen * sizeof(float));
+        cudaMalloc(&s->complexBuf, batch * s->nModes * sizeof(cufftComplex));
+    }
+    else
+    {
+        cufftResult res = cufftPlanMany(
+            &s->planD2Z, 1, n,
+            inembed, 1, fftLen,
+            onembed, 1, s->nModes,
+            CUFFT_D2Z, batch
+        );
+        if (res != CUFFT_SUCCESS)
+        {
+            fprintf(stderr, "CylFFT Sector: D2Z plan failed: %d\n", res);
+            delete s;
+            return nullptr;
+        }
+
+        res = cufftPlanMany(
+            &s->planZ2D, 1, n,
+            onembed, 1, s->nModes,
+            inembed, 1, fftLen,
+            CUFFT_Z2D, batch
+        );
+        if (res != CUFFT_SUCCESS)
+        {
+            fprintf(stderr, "CylFFT Sector: Z2D plan failed: %d\n", res);
+            cufftDestroy(s->planD2Z);
+            delete s;
+            return nullptr;
+        }
+
+        cudaMalloc(&s->realBuf, batch * fftLen * sizeof(double));
+        cudaMalloc(&s->complexBuf,
+                   batch * s->nModes * sizeof(cufftDoubleComplex));
+    }
+
+    return s;
+}
+
+
+extern "C"
+void cylFFTPrecondSetCoeffsSector(
+    CylFFTHandle h,
+    const double* lower,
+    const double* upper,
+    const double* thetaCoeff
+)
+{
+    if (!h || !h->sectorMode) return;
+
+    int nr = h->nr;
+    int N = h->nthetaSector;
+    int nModes = h->nModes;  // N + 1
+
+    // Thomas LU factorization with DCT-II eigenvalues.
+    // eigenTheta[m] = 2*(1 - cos(pi*m/N)) for m=0..N
+    // This is the discrete Neumann-Laplacian eigenvalue.
+
+    double* hL = new double[nModes * (nr - 1)];
+    double* hD = new double[nModes * nr];
+    double* hU = new double[nr];
+
+    memcpy(hU, upper, nr * sizeof(double));
+
+    for (int m = 0; m < nModes; m++)
+    {
+        double eigenTheta = 2.0 * (1.0 - cos(M_PI * m / N));
+
+        // m=0: constant mode (Neumann null space), needs regularization
+        double regFrac = (m == 0) ? 1e-3 : 0.0;
+
+        // First row
+        double diagBase0 = -(lower[0] + upper[0]);
+        double diag0 = diagBase0 * (1.0 + regFrac)
+                      - thetaCoeff[0] * eigenTheta;
+        hD[m * nr + 0] = diag0;
+
+        // Forward sweep
+        for (int i = 1; i < nr; i++)
+        {
+            double diagBaseI = -(lower[i] + upper[i]);
+            double diagI = diagBaseI * (1.0 + regFrac)
+                          - thetaCoeff[i] * eigenTheta;
+
+            double l = lower[i] / hD[m * nr + (i - 1)];
+            hL[m * (nr - 1) + (i - 1)] = l;
+            hD[m * nr + i] = diagI - l * upper[i - 1];
+        }
+    }
+
+    // Transfer to GPU
+    if (h->useFloat)
+    {
+        float* hLf = new float[nModes * (nr - 1)];
+        float* hDf = new float[nModes * nr];
+        float* hUf = new float[nr];
+
+        for (int i = 0; i < nModes * (nr - 1); i++) hLf[i] = (float)hL[i];
+        for (int i = 0; i < nModes * nr; i++) hDf[i] = (float)hD[i];
+        for (int i = 0; i < nr; i++) hUf[i] = (float)hU[i];
+
+        if (h->thomasL_f) cudaFree(h->thomasL_f);
+        if (h->thomasD_f) cudaFree(h->thomasD_f);
+        if (h->thomasU_f) cudaFree(h->thomasU_f);
+
+        cudaMalloc(&h->thomasL_f, nModes * (nr - 1) * sizeof(float));
+        cudaMalloc(&h->thomasD_f, nModes * nr * sizeof(float));
+        cudaMalloc(&h->thomasU_f, nr * sizeof(float));
+
+        cudaMemcpy(h->thomasL_f, hLf, nModes * (nr - 1) * sizeof(float),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(h->thomasD_f, hDf, nModes * nr * sizeof(float),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(h->thomasU_f, hUf, nr * sizeof(float),
+                   cudaMemcpyHostToDevice);
+
+        delete[] hLf;
+        delete[] hDf;
+        delete[] hUf;
+    }
+    else
+    {
+        if (h->thomasL_d) cudaFree(h->thomasL_d);
+        if (h->thomasD_d) cudaFree(h->thomasD_d);
+        if (h->thomasU_d) cudaFree(h->thomasU_d);
+
+        cudaMalloc(&h->thomasL_d, nModes * (nr - 1) * sizeof(double));
+        cudaMalloc(&h->thomasD_d, nModes * nr * sizeof(double));
+        cudaMalloc(&h->thomasU_d, nr * sizeof(double));
+
+        cudaMemcpy(h->thomasL_d, hL, nModes * (nr - 1) * sizeof(double),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(h->thomasD_d, hD, nModes * nr * sizeof(double),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(h->thomasU_d, hU, nr * sizeof(double),
+                   cudaMemcpyHostToDevice);
+    }
+
+    delete[] hL;
+    delete[] hD;
+    delete[] hU;
+}
+
+
+extern "C"
+void cylFFTPrecondApplySectorFloat(
+    CylFFTHandle h,
+    const float* b_ptr,
+    float* x_ptr,
+    int n
+)
+{
+    if (!h || !h->sectorMode || !h->thomasL_f) return;
+
+    int nr = h->nr;
+    int nSectors = h->nSectors;
+    int N = h->nthetaSector;
+    int nModes = h->nModes;
+    int batch = nr * nSectors;
+    int totalInput = batch * N;
+    int fftLen = 2 * N;
+
+    float* realBuf = static_cast<float*>(h->realBuf);
+    cufftComplex* complexBuf = static_cast<cufftComplex*>(h->complexBuf);
+
+    // 1. Mirror: input[batch*N] -> realBuf[batch*2N]
+    {
+        int blockSize = 256;
+        int gridSize = (totalInput + blockSize - 1) / blockSize;
+        mirrorForDCTKernel<float><<<gridSize, blockSize>>>(
+            b_ptr, realBuf, N, totalInput
+        );
+    }
+
+    // 2. Forward FFT: R2C of length 2N, batch = nr*nSectors
+    cufftExecR2C(h->planR2C_f, realBuf, complexBuf);
+
+    // 3. Thomas solve: one launch per sector (sectors share Thomas factors)
+    {
+        int blockSize = 128;
+        int gridSize = (nModes + blockSize - 1) / blockSize;
+        for (int s = 0; s < nSectors; s++)
+        {
+            cufftComplex* sectorData = complexBuf + s * nr * nModes;
+            thomasSolveKernel<float, cufftComplex><<<gridSize, blockSize>>>(
+                sectorData,
+                h->thomasL_f,
+                h->thomasD_f,
+                h->thomasU_f,
+                nr, nModes
+            );
+        }
+    }
+
+    // 4. Inverse FFT: C2R of length 2N, batch = nr*nSectors
+    cufftExecC2R(h->planC2R_f, complexBuf, realBuf);
+
+    // 5. Extract first N elements from each 2N batch + scale by 1/(2N)
+    {
+        float scale = 1.0f / fftLen;
+        int blockSize = 256;
+        int gridSize = (totalInput + blockSize - 1) / blockSize;
+        extractScaleKernel<float><<<gridSize, blockSize>>>(
+            realBuf, x_ptr, scale, N, totalInput
+        );
+    }
+}
+
+
+extern "C"
+void cylFFTPrecondApplySectorDouble(
+    CylFFTHandle h,
+    const double* b_ptr,
+    double* x_ptr,
+    int n
+)
+{
+    if (!h || !h->sectorMode || !h->thomasL_d) return;
+
+    int nr = h->nr;
+    int nSectors = h->nSectors;
+    int N = h->nthetaSector;
+    int nModes = h->nModes;
+    int batch = nr * nSectors;
+    int totalInput = batch * N;
+    int fftLen = 2 * N;
+
+    double* realBuf = static_cast<double*>(h->realBuf);
+    cufftDoubleComplex* complexBuf =
+        static_cast<cufftDoubleComplex*>(h->complexBuf);
+
+    // 1. Mirror
+    {
+        int blockSize = 256;
+        int gridSize = (totalInput + blockSize - 1) / blockSize;
+        mirrorForDCTKernel<double><<<gridSize, blockSize>>>(
+            b_ptr, realBuf, N, totalInput
+        );
+    }
+
+    // 2. Forward FFT: D2Z
+    cufftExecD2Z(h->planD2Z, realBuf, complexBuf);
+
+    // 3. Thomas solve per sector
+    {
+        int blockSize = 128;
+        int gridSize = (nModes + blockSize - 1) / blockSize;
+        for (int s = 0; s < nSectors; s++)
+        {
+            cufftDoubleComplex* sectorData = complexBuf + s * nr * nModes;
+            thomasSolveKernel<double, cufftDoubleComplex>
+                <<<gridSize, blockSize>>>(
+                sectorData,
+                h->thomasL_d,
+                h->thomasD_d,
+                h->thomasU_d,
+                nr, nModes
+            );
+        }
+    }
+
+    // 4. Inverse FFT: Z2D
+    cufftExecZ2D(h->planZ2D, complexBuf, realBuf);
+
+    // 5. Extract + scale
+    {
+        double scale = 1.0 / fftLen;
+        int blockSize = 256;
+        int gridSize = (totalInput + blockSize - 1) / blockSize;
+        extractScaleKernel<double><<<gridSize, blockSize>>>(
+            realBuf, x_ptr, scale, N, totalInput
+        );
+    }
 }

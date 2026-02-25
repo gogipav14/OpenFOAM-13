@@ -131,6 +131,17 @@ RUN nvcc -O3 -shared -Xcompiler -fPIC \
     /opt/OpenFOAM-13/modules/OGL/src/OGLOperator/HaloKernels.cu \
     && echo "Halo exchange CUDA kernels OK"
 
+# ---- Geometric Multigrid CUDA kernels ----------------------------------------
+# Transfer operators (restriction, trilinear prolongation) and coarse-grid
+# CSR matrix construction for geometric MG + FFT preconditioner.
+RUN nvcc -O3 -shared -Xcompiler -fPIC \
+    -gencode arch=compute_80,code=sm_80 \
+    -gencode arch=compute_89,code=sm_89 \
+    -gencode arch=compute_120,code=sm_120 \
+    -o /opt/ginkgo/lib/libmgkernels.so \
+    /opt/OpenFOAM-13/modules/OGL/src/OGLSolvers/OGLSolverBase/MultigridKernels.cu \
+    && echo "Geometric MG CUDA kernels OK"
+
 # ---- OGL (OpenFOAM Ginkgo Layer) ------------------------------------------
 ENV GINKGO_ROOT=/opt/ginkgo
 

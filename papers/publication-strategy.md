@@ -1,536 +1,636 @@
-# Publication Strategy: Two-Paper Approach
+# Publication Strategy v2.0 — Updated From Research Results
+
+**Last updated:** 2026-02-21
+**Branch:** `master` (merged from `ogl-preconditioner-research`)
 
 ## Overview
 
-Two complementary papers targeting different audiences and journals, maximizing total impact from the GPU solver + MixFOAM work.
+Three papers targeting different audiences, built entirely from validated results.
 
-| | Paper 1 | Paper 2 |
-|---|---|---|
-| **Title** | Adaptive Mixed-Precision GPU Linear Solvers for OpenFOAM via Ginkgo | MixFOAM: Automated CFD Case Generation for Industrial Mixing Vessels |
-| **Journal** | Computer Physics Communications | SoftwareX |
-| **IF** | ~7.2 (Q1) | ~2.4 (Q2) |
-| **Review** | ~12 months | ~9 weeks |
-| **Focus** | Numerical methods + performance | Software tool description |
-| **Length** | No strict limit (~20-30 pages) | 3,000 words max, 6 figures |
+| | Paper 1 | Paper 2 | Paper 3 |
+|---|---|---|---|
+| **Title** | GPU-Accelerated AMG and ILU-ISAI Preconditioned Krylov Solvers for OpenFOAM via Ginkgo | MixFOAM: Automated CFD Case Generation for Industrial Mixing Vessels | On the Superlinear Iteration Growth of Algebraic Multigrid at Scale in OpenFOAM |
+| **Journal** | Computer Physics Communications | SoftwareX | Int. J. Numer. Meth. Fluids (short comm.) |
+| **IF** | ~7.2 (Q1) | ~2.4 (Q2) | ~1.7 (Q2) |
+| **Review** | ~12 months | ~9 weeks | ~6 months |
+| **Focus** | Numerical methods + GPU preconditioner selection | Software tool description | Empirical finding on GAMG scaling |
+| **Length** | ~20-25 pages | 3,000 words, 6 figures | ~6-8 pages |
+| **Data ready** | 90% | 70% | 80% |
 
 ---
 
-# Paper 1: Adaptive Mixed-Precision GPU Linear Solvers for OpenFOAM via Ginkgo
+## What Changed From v1.0
 
-**Target journal**: Computer Physics Communications (Elsevier)
-**Article type**: Computer Programs in Physics
+The original strategy centered on four contributions: adaptive mixed-precision, GPU-resident halo exchange, memory pooling, and batched solving. Research invalidated this framing:
 
-## Proposed Title
+| Original Contribution | Outcome | Status |
+|----------------------|---------|--------|
+| Adaptive mixed-precision | Ginkgo v1.11.0 FP32 SpGEMM is 3-8x slower than FP64. FP32 CG ~2x slower per-iteration. Produces *worse* wall time. | **Dead** |
+| GPU-resident halo exchange | Code functional (690 LOC + CUDA kernels). But single-GPU data transfer is 0.016% of step time. Not measurably impactful. | **Immaterial on 1 GPU** |
+| Memory pool | Bucket allocation functional. Never benchmarked. `createVector()` bypass found in code audit. | **Unbenchmarked** |
+| Batched solver | `executeBatchedSolve()` is a stub — falls back to sequential. | **Incomplete** |
 
-> Adaptive Mixed-Precision GPU Linear Solvers for OpenFOAM via Ginkgo: GPU-Resident Data Structures, Halo Exchange, and Memory Pooling
+What we *actually* built and validated:
 
-## Abstract (draft, ~200 words)
+| Actual Contribution | Evidence |
+|---------------------|----------|
+| AMG-PCG with convergence-gated hierarchy caching | 5.47x at 3M cells. mgCacheInterval=10 optimal (+14.4% vs default). |
+| BiCGStab + ILU-ISAI for asymmetric momentum | 6.85x at 5M cells. Crossover vs Block-Jacobi at ~4.5M confirmed. |
+| Preconditioner selection analysis (BJ vs ILU+ISAI vs CPU symGS) | 8-mesh scaling study with iteration + wall time crossover. |
+| GAMG superlinear iteration degradation | 13 → 66 → 124 → 152 iters (40K → 1M → 3M → 5M). GPU MG linear: 22 → 44 → 66 → 44. |
+| CSR refresh propagation fix | invalidateValues() for variable-coefficient momentum matrices. |
 
-We present an extended GPU-accelerated linear solver module for OpenFOAM based on the Ginkgo numerical linear algebra library. Building on the OpenFOAM-Ginkgo Layer (OGL), we introduce four novel features that address key performance bottlenecks in GPU-accelerated finite-volume CFD: (1) an adaptive mixed-precision strategy that dynamically switches between FP32 and FP64 based on convergence monitoring, with residual-based, tolerance-based, and hybrid switching criteria; (2) GPU-resident halo exchange that eliminates per-iteration host round-trips by performing MPI boundary communication directly from device memory; (3) a bucket-based GPU memory pool that eliminates CUDA allocation overhead across iterative solves; and (4) a batched solver interface that amortizes matrix setup costs for multi-component field systems. We validate the implementation on a suite of industrially relevant stirred-tank mixing simulations spanning Reynolds numbers from 10^3 to 10^6, mesh sizes from 0.5M to 20M cells, and both cylindrical and rectangular vessel geometries. The adaptive precision strategy achieves 1.5-2.2x speedup over pure FP64 solving while maintaining identical convergence behavior. GPU-resident halo exchange reduces communication overhead by 40-60% for multi-GPU configurations. Combined, the full feature set delivers 4-8x overall wall-clock speedup compared to multi-core CPU execution on industrial mixing cases. The solver is open-source and portable across NVIDIA, AMD, and Intel GPUs via Ginkgo's backend abstraction.
+**Paper 1 is completely reframed around the actual results. The story is stronger: definitive speedups with production recommendations, not aspirational mixed-precision claims.**
+
+---
+
+# Paper 1: GPU-Accelerated AMG and ILU-ISAI Krylov Solvers for OpenFOAM
+
+**Target:** Computer Physics Communications (Elsevier)
+**Article type:** Computer Programs in Physics
+
+## Title
+
+> GPU-Accelerated Algebraic Multigrid and ILU-ISAI Preconditioned Krylov Solvers for Finite-Volume CFD via the Ginkgo Linear Algebra Library
+
+## Abstract (draft, ~250 words)
+
+We present a GPU-accelerated linear solver module for the OpenFOAM finite-volume framework, built on the Ginkgo numerical linear algebra library. The module provides two solver classes targeting the dominant computational costs in pressure-velocity coupled CFD: (1) a preconditioned conjugate gradient solver with algebraic multigrid (AMG) preconditioning for the symmetric pressure Poisson system, featuring convergence-gated hierarchy caching that amortizes the expensive multigrid setup across multiple solves; and (2) a stabilized biconjugate gradient solver (BiCGStab) with parallel incomplete LU preconditioning using incomplete sparse approximate inverse triangular solves (ILU-ISAI) for the asymmetric momentum system.
+
+We validate the implementation on structured and unstructured meshes spanning 40,000 to 5,000,000 cells. The GPU AMG-PCG pressure solver achieves 5.47x speedup over OpenFOAM's native GAMG at 3M cells, with the speedup increasing monotonically with mesh size. We identify and quantify a previously unreported superlinear iteration growth in OpenFOAM's GAMG implementation (13 iterations at 40K cells to 152 at 5M), while the GPU AMG iteration count scales linearly. For the momentum system, we perform a systematic comparison of Block-Jacobi and ILU-ISAI preconditioners, identifying a crossover point at approximately 4.5M cells above which ILU-ISAI delivers superior wall-clock performance (6.85x speedup at 5M cells) due to its iteration quality matching CPU-native symmetric Gauss-Seidel. We provide mesh-size-dependent solver selection recommendations validated across the full scaling range. The solver is open-source and portable across NVIDIA, AMD, and Intel GPUs via Ginkgo's backend abstraction.
 
 ## 1. Introduction
 
 ### Motivation
-- Pressure Poisson equation dominates incompressible CFD cost (60-80% wall time)
-- LES of industrial mixing requires fine meshes (2-20M cells) and long physical times (10-100 impeller revolutions)
+- Pressure Poisson equation dominates incompressible/weakly-compressible CFD cost (60-80% wall time)
+- LES of industrial flows requires fine meshes (2-20M cells) and long physical times
 - GPU acceleration of sparse linear solvers is the highest-impact optimization target
-- Existing approaches (AmgX, PETSc/HYPRE) are either vendor-locked or lack CFD-specific optimizations
+- Existing approaches: AmgX (NVIDIA-only), PETSc/HYPRE (complex integration), base OGL (no AMG, no momentum solver)
+- **No prior work provides GPU AMG + asymmetric momentum solver for OpenFOAM with preconditioner selection guidance**
 
 ### Literature context
-- Olenik et al. (2024) — base OGL plugin for OpenFOAM/Ginkgo integration [Meccanica]
-- Piscaglia & Ghioldi (2023) — amgx4Foam: NVIDIA AmgX for OpenFOAM [Aerospace]
-- petsc4Foam — PETSc/HYPRE integration [NextFOAM]
-- GPU-accelerated coupled solvers (2024) — heterogeneous GPGPU implicit coupled solvers [arXiv]
-- Wendler et al. (2024) — mixed precision in FlowSimulator [Scipedia]
-- Nayak et al. (2025) — efficient batched band solvers on GPUs [IJHPCA]
-- GROMACS GPU-resident halo exchange (2025) — GPU-initiated NVSHMEM approach [SC'25]
-- Cojean et al. (2024) — Ginkgo library paper [IJHPCA]
+- Olenik et al. (2024) -- base OGL plugin for OpenFOAM/Ginkgo integration [Meccanica]
+- Piscaglia & Ghioldi (2023) -- amgx4Foam: NVIDIA AmgX for OpenFOAM [Aerospace]
+- petsc4Foam -- PETSc/HYPRE integration [NextFOAM]
+- Cojean et al. (2024) -- Ginkgo library [IJHPCA]
+- Wendler et al. (2024) -- mixed precision in FlowSimulator [Scipedia]
+- GPU-accelerated coupled solvers (2024) -- heterogeneous GPGPU implicit [arXiv]
+- Anzt et al. (2022) -- ISAI for approximate triangular solves [SISC]
+- Chow & Patel (2015) -- ParILU for GPUs [SISC]
 
-### Contributions (clearly differentiated from prior OGL work)
-1. Adaptive mixed-precision with multiple switching strategies
-2. GPU-resident halo exchange avoiding host staging
-3. Bucket-based GPU memory pool for allocation amortization
-4. Batched solver interface for multi-component fields
-5. Comprehensive benchmarking on industrial mixing geometries
+### Contributions
+1. GPU AMG-PCG with convergence-gated hierarchy caching for pressure
+2. GPU BiCGStab with ILU-ISAI preconditioning for asymmetric momentum
+3. Systematic BJ vs ILU-ISAI crossover analysis with wall-time and iteration metrics
+4. Empirical documentation of GAMG superlinear iteration growth at scale
+5. Validated mesh-size-dependent solver selection recommendations
+6. Comprehensive benchmarking on 2D and 3D cases (40K-5M cells)
 
 ## 2. Mathematical Formulation
 
-### 2.1 Pressure Poisson Equation in OpenFOAM
-- LDU matrix storage format
-- Interface coupling for processor and non-conformal boundaries
-- Convergence criteria (absolute tolerance, relative tolerance, max iterations)
+### 2.1 Pressure Poisson System
+- LDU matrix storage and CSR conversion for GPU
+- Symmetric positive-definite system: PCG with AMG preconditioner
+- Ginkgo PGM (Parallel Graph Match) coarsening
+- Jacobi d2 smoother (validated optimal vs Chebyshev by wall time)
+- Convergence-gated hierarchy caching: rebuild only when iteration count exceeds threshold or interval expires
 
-### 2.2 Adaptive Mixed-Precision Strategy
+**Hierarchy caching formulation:**
 
-Define the switching criteria formally:
+Let $k_i$ be the iteration count at call $i$, $\tau$ the max-iteration threshold, and $N$ the cache interval.
 
-**Residual-based switching:**
-- Monitor convergence ratio: $\rho_k = \|r_k\| / \|r_{k-1}\|$
-- If $\rho_k > \tau_\text{stag}$ for $n_\text{stag}$ consecutive iterations in FP32, switch to FP64
-- Default: $\tau_\text{stag} = 0.95$, $n_\text{stag} = 3$
+$$\text{rebuild}(i) = \begin{cases} \text{true} & \text{if } i \mod N = 0 \\ \text{true} & \text{if } k_{i-1} > \tau \\ \text{false} & \text{otherwise} \end{cases}$$
 
-**Tolerance-based switching:**
-- If $\|r_k\| < \beta \cdot \epsilon_\text{target}$, switch to FP64 for final convergence
-- Default: $\beta = 10$ (switch when within one order of magnitude)
+This amortizes the $O(N_{\text{levels}} \cdot \text{nnz})$ hierarchy construction cost across $N$ calls while preserving convergence through the max-iteration safety valve.
 
-**Hybrid switching:**
-- Combines both criteria: switch on first trigger
+### 2.2 Momentum System
+- Asymmetric matrix from advection terms: BiCGStab solver
+- Block-Jacobi preconditioner: extracts block-diagonal, inverts locally
+- ILU-ISAI preconditioner:
+  - ParILU factorization: $A \approx LU$ computed in parallel (Chow-Patel algorithm)
+  - ISAI triangular solves: precompute $\tilde{L}^{-1} \approx L^{-1}$, $\tilde{U}^{-1} \approx U^{-1}$ as sparse matrices
+  - Application: $M^{-1}r = \tilde{U}^{-1}(\tilde{L}^{-1}r)$ via two parallel SpMV (not sequential forward/backward substitution)
 
-**Iterative refinement:**
-1. Solve $A \cdot \delta x = r$ in FP32 (loose tolerance $\epsilon_\text{inner} = 10^{-4}$)
-2. Update solution in FP64: $x \leftarrow x + \delta x$
-3. Compute residual in FP64: $r \leftarrow b - Ax$
-4. Repeat up to $k_\text{max}$ refinement steps
+**Key insight (validated empirically):** Exact triangular solves (`LowerTrs`/`UpperTrs`) are fundamentally sequential (row $i$ depends on row $i-1$), making them hostile to GPU thread occupancy. ISAI trades exactness for parallelism -- the approximate inverse is computed once and applied as parallel SpMV, eliminating the sequential bottleneck.
 
-**Error analysis:**
-- Bound on mixed-precision error vs pure FP64
-- Conditions for guaranteed convergence of iterative refinement
-
-### 2.3 GPU-Resident Halo Exchange
-
-**Communication model:**
-- Standard approach: GPU $\to$ CPU $\to$ MPI $\to$ CPU $\to$ GPU per SpMV apply
-- GPU-resident approach: GPU $\to$ MPI (CUDA-aware) $\to$ GPU
-- Data volume: $O(\text{boundary cells})$ vs $O(N)$ for full vector transfers
-
-**Three-phase protocol:**
-1. `gather()` — extract boundary cell values from GPU vector into contiguous send buffer (on device)
-2. `exchange()` — non-blocking MPI send/receive (GPU-direct if CUDA-aware MPI available, else stage through pinned host memory)
-3. `scatter()` — add received halo contributions to GPU result vector
-
-### 2.4 Memory Pool Design
-
-**Bucket-based allocation:**
-- Sizes rounded up to next power of 2
-- LRU eviction for unused allocations
-- Thread-safe with mutex protection
-- Pre-allocation capability for known sizes
-- Statistics tracking: hit rate, miss rate, peak usage
+### 2.3 LDU to CSR Conversion
+- Structure caching: sparsity pattern reused across solves on static meshes
+- Value refresh: `invalidateValues()` propagates CSR coefficient update when momentum matrix changes each PISO corrector
+- Handles symmetric (pressure) and asymmetric (momentum) matrices
 
 ## 3. Implementation
 
 ### 3.1 Software Architecture
-- Inheritance: `OGLSolverBase` $\to$ `lduMatrix::solver`
-- `OGLPCGSolver` — symmetric PCG with adaptive precision
-- `OGLBatchedSolver` — multi-RHS with shared matrix structure
-- `FoamGinkgoLinOp` — custom Ginkgo linear operator wrapping OpenFOAM's LDU matrix
-- `OGLExecutor` — singleton device manager with multi-GPU rank binding
 
-### 3.2 LDU to CSR Conversion
-- Structure caching for static meshes (invalidation for dynamic mesh / NCC)
-- Separate FP32/FP64 value arrays for mixed-precision
-- Handles symmetric and asymmetric matrices
+```
+OGLSolverBase (lduMatrix::solver)
+  |-- OGLPCGSolver          # Symmetric PCG + AMG preconditioner
+  |-- OGLBiCGStabSolver     # Asymmetric BiCGStab + BJ/ILU-ISAI
+  |
+  |-- FoamGinkgoLinOp        # Custom Ginkgo LinOp wrapping OpenFOAM LDU
+  |-- lduToCSR               # LDU -> CSR conversion with structure caching
+  |-- OGLExecutor            # Singleton device manager
+```
 
-### 3.3 Multi-GPU Device Binding
-- Automatic detection via MPI environment variables (OpenMPI, MPICH, MVAPICH2, SLURM, Intel MPI)
-- Fallback to `Pstream::myProcNo() % numDevices`
+### 3.2 AMG Hierarchy Caching
+- Static cache keyed by field name (pressure, velocity components)
+- Mutex-protected for thread safety
+- Hierarchy persisted across solver instantiations (OpenFOAM creates new solver object each call)
+- Interval + max-iteration dual gate
+
+### 3.3 Preconditioner Selection
+- Factory pattern: `preconditioner` keyword in `OGLCoeffs` sub-dictionary
+- Options: `blockJacobi`, `ILU`, `ISAI`, `multigrid`
+- `ILU` internally uses `gko::factorization::ParIlu` + `gko::preconditioner::Ilu<LowerIsai, UpperIsai>`
 
 ### 3.4 Performance Instrumentation
-- RAII `ScopedTimer` with 10 timing categories
-- Parallel reduce across MPI ranks for load balance analysis
+- RAII `ScopedTimer` with per-phase timing
+- VRAM diagnostics (free/total) logged at hierarchy construction
+- Per-solve iteration count and convergence status tracking
 
-## 4. Benchmarks
+## 4. Benchmark Cases
 
-### 4.1 Test Cases
+### 4.1 Case A: 2D Lid-Driven Cavity (Scaling Study)
 
-Use MixFOAM-generated cases (reference Paper 2) spanning:
+The primary scaling vehicle. kEpsilon RANS, PISO with 3 pressure correctors, 20 timesteps.
 
-| Case | Reactor | Volume | Mesh | Re_imp | GPU |
-|------|---------|--------|------|--------|-----|
-| A | Mobius_MIX 100L | 50 L | 2M cells | ~50,000 | 1x RTX 6000 Ada |
-| B | Mobius_MIX 1000L | 500 L | 8M cells | ~200,000 | 1x RTX 6000 Ada |
-| C | Sartorius_Palletank 200L | 100 L | 3M cells | ~30,000 | 1x RTX 6000 Ada |
-| D | Bujalski 200L | 100 L | 5M cells | ~100,000 | 1x RTX 6000 Ada |
-| E | Mobius_MIX 1000L | 500 L | 20M cells | ~200,000 | 4x RTX 6000 Ada |
+**Mesh sizes:** 200x200 (40K) through 2236x2236 (5M)
 
-All cases: LES with WALE subgrid model, non-conformal coupling (NCC) for rotating impeller.
+**Solver configurations compared:**
 
-### 4.2 Comparisons
+| Variant | Pressure | Momentum | Label |
+|---------|----------|----------|-------|
+| CPU | GAMG + GaussSeidel | smoothSolver + symGS | Baseline |
+| GPU-p | OGLPCG + AMG (Ginkgo) | smoothSolver + symGS (CPU) | Pressure-only GPU |
+| GPU-all (BJ) | OGLPCG + AMG | OGLBiCGStab + Block-Jacobi | Full GPU, BJ momentum |
+| GPU-all (ILU) | OGLPCG + AMG | OGLBiCGStab + ILU-ISAI | Full GPU, ILU momentum |
 
-For each case, compare:
-1. **CPU baseline**: OpenFOAM's native PCG + DIC, 32 cores (2x AMD EPYC)
-2. **Base OGL**: FP64 GPU PCG via Ginkgo (no extensions)
-3. **OGL + adaptive precision**: FP32/FP64 switching
-4. **OGL + GPU halo exchange**: Device-resident communication
-5. **OGL + memory pool**: Allocation amortization
-6. **Full stack**: All features enabled
+**Already collected:** Full scaling data at 8 mesh sizes (200, 600, 1000, 1200, 1500, 1732, 2000, 2236). Stored in `benchmarks/bicgstab_results_ilu_isai/` and `benchmarks/bicgstab_results_crossover/`.
 
-### 4.3 Metrics
-- Wall-clock time per timestep (mean over 100 steps, excluding first 10 for warmup)
-- Pressure solve time breakdown (conversion, SpMV, halo, preconditioner, convergence check)
-- Number of iterations to convergence (FP32 vs FP64 vs adaptive)
-- Solution accuracy: $\|x_\text{GPU} - x_\text{CPU}\|_\infty / \|x_\text{CPU}\|_\infty$
-- Strong scaling efficiency (1, 2, 4 GPUs for Case E)
-- Memory pool hit rate and allocation overhead
+### 4.2 Case B: 3D Stirred Tank LES (Industrial Application)
 
-### 4.4 Expected Results
+Demonstrates GPU solver on a realistic industrial case with rotating geometry, non-conformal coupling, and passive scalar transport.
 
-| Feature | Speedup vs CPU | Speedup vs base OGL |
-|---------|---------------|---------------------|
-| Base OGL (FP64) | 2-4x | 1x (baseline) |
-| + Adaptive precision | 3-6x | 1.5-2.2x |
-| + GPU halo exchange | +5-10% | +5-10% |
-| + Memory pool | +2-3% | +2-3% |
-| Full stack | 4-8x | 2-3x |
+**Source:** `tutorials/incompressibleFluid/stirredTankLES_GPU/`
+**Solver:** incompressibleFluid, PIMPLE, WALE LES
+**Mesh:** ~143K cells (base), scale to 1-3M via snappyHexMesh refinement
+**Fields:** U, p, tracer
 
-### 4.5 Validation
-- Verify identical convergence behavior (same final residual, same number of outer iterations)
-- Power number Np vs published Rushton turbine correlations (Np ~ 5.0 for fully turbulent)
-- Mixing time vs Grenville correlation: $N \cdot \theta_{95} = 5.2 \cdot (D/T)^{-2} \cdot \text{Re}^{-0.2}$ (approximate)
+**Benchmark plan:**
+- CPU baseline: GAMG + smoothSolver (standard OpenFOAM)
+- GPU-p: OGLPCG + AMG for pressure, CPU momentum
+- GPU-all (BJ): OGLPCG + AMG + OGLBiCGStab+BJ
+- GPU-all (ILU): OGLPCG + AMG + OGLBiCGStab+ILU-ISAI
+- 100 timesteps per configuration (exclude first 10 for warmup)
 
-## 5. Results and Discussion
+**Visualization deliverables:**
+- Velocity magnitude mid-plane slice (CPU vs GPU, qualitative match)
+- GPU-CPU field difference contour ($|U_\text{GPU} - U_\text{CPU}|$)
+- Tracer concentration evolution (4-panel time series)
+- Residual convergence histories per-solve overlay (CPU vs GPU)
 
-### 5.1 Adaptive Precision Analysis
-- Convergence histories: FP32 vs FP64 vs adaptive for pressure equation
-- Switching frequency and trigger analysis across different Re regimes
-- Impact on outer PISO/PIMPLE convergence
+### 4.3 Case C: 3D MotorBike Steady-State (Large Unstructured Mesh)
 
-### 5.2 GPU-Resident Halo Exchange
-- Communication time breakdown: host-staged vs GPU-direct
-- Scaling with number of processor interfaces
-- Impact of CUDA-aware MPI availability
+External aerodynamics around complex geometry. SIMPLE steady-state eliminates time-stepping variability -- pure solver benchmarking.
 
-### 5.3 Memory Pool Effectiveness
-- Hit rate vs solve count (cold start → steady state)
-- Peak GPU memory usage with and without pool
-- Allocation latency distribution
+**Source:** `tutorials/incompressibleFluid/motorBike/motorBike/`
+**Solver:** incompressibleFluid, SIMPLE (steady)
+**Mesh:** 1M-5M+ cells (scalable via snappyHexMesh refinement levels)
+**Fields:** U, p, k, nuTilda (Spalart-Allmaras)
 
-### 5.4 Batched Solving
-- Velocity solve overhead: individual vs batched
-- Matrix setup amortization benefit
+**Benchmark plan:**
+- Same 4 solver configurations
+- Steady-state: run to convergence (residuals < 1e-5), compare total iteration count and wall time
+- Mesh scaling: run at 1M, 2M, 4M cells
 
-### 5.5 Application Results
-- Brief mixing results (detailed in Paper 2): velocity fields, power numbers, mixing times
-- Demonstrate that GPU acceleration enables parametric studies previously infeasible
-
-## 6. Conclusions
-
-- Novel adaptive mixed-precision strategy with formal convergence guarantees
-- GPU-resident halo exchange reduces communication overhead by 40-60%
-- Memory pooling eliminates allocation bottleneck
-- 4-8x overall speedup enables industrial-scale LES mixing studies
-- Open-source, vendor-portable via Ginkgo (NVIDIA/AMD/Intel)
-- Code available at: https://github.com/gogipav14/OpenFOAM-13 (branch: ogl-gpu-solvers)
-
-## Figures (planned, ~10-12)
-
-1. Software architecture diagram (OGLSolverBase hierarchy + Ginkgo integration)
-2. Adaptive precision state machine (FP32 ↔ FP64 switching logic)
-3. GPU-resident halo exchange vs host-staged: data flow diagram
-4. Memory pool bucket structure schematic
-5. Convergence histories: FP32 vs FP64 vs adaptive (Case A)
-6. Pressure solve time breakdown bar chart (all 5 configurations, Case B)
-7. Overall wall-clock speedup bar chart (all cases, all configurations)
-8. Strong scaling plot (1-4 GPUs, Case E)
-9. Memory pool hit rate vs timestep number
-10. Adaptive precision switching frequency vs Reynolds number
-11. Solution accuracy ($L_\infty$ error) vs configuration
-12. Velocity magnitude slice from mixing case (visual validation)
-
-## References (key, ~30-40 total)
-
-- Olenik et al. (2024) — OGL base plugin [Meccanica]
-- Cojean et al. (2024) — Ginkgo library [IJHPCA]
-- Piscaglia & Ghioldi (2023) — amgx4Foam [Aerospace]
-- Wendler et al. (2024) — mixed precision FlowSimulator
-- Nayak et al. (2025) — batched GPU solvers [IJHPCA]
-- GROMACS GPU halo exchange (2025) [SC'25]
-- Weller et al. (1998) — OpenFOAM
-- Niceno (2016) — GPU-accelerated pressure solvers for CFD
-- Higuera et al. (2015) — mixed precision iterative refinement
-- Carson & Higham (2018) — adaptive precision in Krylov methods
+**Visualization deliverables:**
+- Pressure coefficient on motorcycle surface (CPU vs GPU)
+- Velocity streamlines in wake region
+- Drag/lift coefficient convergence history (CPU vs GPU overlay)
+- Residual convergence comparison (all fields, log scale)
 
 ---
 
-# Paper 2: MixFOAM — Automated CFD Case Generation for Industrial Mixing Vessels
+## 5. Visualization and Comparison Pipeline
 
-**Target journal**: SoftwareX (Elsevier)
-**Article type**: Original Software Publication
+### 5.1 Infrastructure to Build
 
-**Constraints**: 3,000 words max (excluding title, authors, references), 6 figures max
-
-## Proposed Title
-
-> MixFOAM: An Open-Source Python Tool for Automated OpenFOAM Mixing Simulation from Industrial Reactor Databases
-
-## Required Metadata Table (SoftwareX format)
-
-| | |
-|---|---|
-| **Current code version** | v1.0 |
-| **Permanent link to code** | https://github.com/gogipav14/OpenFOAM-13/tree/ogl-gpu-solvers/mixfoam |
-| **Legal code license** | GPL-3.0 (same as OpenFOAM) |
-| **Code versioning system** | git |
-| **Software code languages** | Python 3.10+, C++ (OpenFOAM templates) |
-| **Dependencies** | numpy, matplotlib, plotly, pyvista, vtk, jinja2, scipy |
-| **Support email** | gorgipavlov@gmail.com |
-
-## Abstract (draft, ~150 words)
-
-MixFOAM is an open-source Python command-line tool that automates the generation, execution, and post-processing of OpenFOAM computational fluid dynamics simulations for industrial stirred-tank mixing vessels. Starting from a curated database of 11 reactor families (36 configurations) extracted from MixIT reactor design archives, MixFOAM generates complete, simulation-ready OpenFOAM case directories including parametric meshes, boundary conditions, turbulence models, and function objects for computing mixing-relevant quantities: energy dissipation rate, power consumption, shear rate distributions, mixing homogeneity, and turbulent kinetic energy. The tool handles tank geometry calculations for cylindrical (flat, elliptical, torispherical, conical bottoms) and rectangular vessels, STL extraction and scaling from nested archive formats, and automatic impeller positioning. Post-simulation, MixFOAM produces self-contained interactive HTML reports with field visualizations and time-series analysis. A Docker image provides a portable deployment including OpenFOAM 13 with optional GPU-accelerated linear solvers.
-
-## 1. Motivation and Significance (~500 words)
-
-### The problem
-- CFD simulation of stirred-tank mixing is critical for pharmaceutical, chemical, and bioprocessing industries
-- Setting up OpenFOAM cases for mixing is error-prone and time-consuming:
-  - Tank geometry varies (cylindrical/rectangular, 5+ bottom styles, off-center impellers, baffles)
-  - STL geometry must be extracted, scaled, and positioned correctly
-  - Mesh topology requires impeller zones with non-conformal coupling
-  - Function objects for mixing metrics (EDR, CoV, shear) need domain expertise
-  - Post-processing requires parsing multiple output formats
-- Commercial alternatives (M-Star, ANSYS Fluent) are expensive and closed-source
-- Existing OpenFOAM case generators (CaseFoam, OpenFOAMCaseGenerator) are domain-agnostic
-
-### What MixFOAM provides
-- End-to-end automation: database query → case setup → run → post-process → report
-- Domain-specific: understands reactor geometry, impeller types, mixing metrics
-- Reproducible: same inputs always produce identical case directories
-- Portable: Docker image with all dependencies pre-built
-- Extensible: Python-based, modular architecture, easy to add new reactor families
-
-### Impact
-- Reduces case setup time from hours/days to minutes
-- Enables parametric studies across reactor scales and operating conditions
-- Lowers the barrier to CFD for process engineers without OpenFOAM expertise
-- Facilitates validation against experimental mixing data
-
-## 2. Software Description (~1,200 words)
-
-### 2.1 Software Architecture
+A Python-based comparison tool (`benchmarks/compare_solutions.py`) that automates all publication figures:
 
 ```
-mixfoam/
-├── mixfoam.py              # CLI entry point (argparse)
-├── reactor_db.py           # Parse .mdata archive → reactor catalog
-├── geometry.py             # Tank volume/liquid level calculations
-├── stl_extract.py          # Extract + scale STLs from archives
-├── case_builder.py         # Orchestrate OpenFOAM case generation
-├── runner.py               # Execute OpenFOAM pipeline
-├── postprocess.py          # Parse logs + compute metrics
-├── visualize.py            # VTK reader + plotly figure generators
-├── report.py               # HTML report assembly with jinja2
-└── templates/              # 13 OpenFOAM dict generators
-    ├── blockMeshDict_cylindrical.py
-    ├── blockMeshDict_rectangular.py
-    ├── snappyHexMeshDict.py
-    ├── dynamicMeshDict.py
-    ├── controlDict.py
-    ├── fvSolution.py
-    ├── fvSchemes.py
-    ├── physicalProperties.py
-    ├── momentumTransport.py
-    ├── setFieldsDict.py
-    ├── decomposeParDict.py
-    ├── createNonConformalCouplesDict.py
-    ├── boundary_conditions.py
-    └── report.html
+compare_solutions.py
+  |-- VTK field reader (pyvista)
+  |-- Field difference computation (GPU - CPU)
+  |-- Residual history parser (OpenFOAM log files)
+  |-- Automated figure generation (matplotlib for print, plotly for interactive)
 ```
 
-### 2.2 Reactor Database
+### 5.2 Solution Accuracy Validation
 
-- 11 reactor families, 36 configurations from MixIT archive
-- Covers cylindrical (Mobius, Binder, Bujalski, Mobile) and rectangular (Sartorius, Wand) vessels
-- 5 bottom styles: flat, 2:1 elliptical, torispherical (6%, 10%), conical
-- 1-6 impeller types per reactor, with baffles where applicable
-- Off-center and top-mounted impeller support
-- STLs stored as unit-normalized (impellers) or in meters (baffles)
+For each case and configuration, compute:
 
-### 2.3 Geometry Engine
+**Field-level metrics:**
+- $L_\infty$ relative error: $\|x_\text{GPU} - x_\text{CPU}\|_\infty / \|x_\text{CPU}\|_\infty$
+- $L_2$ relative error: $\|x_\text{GPU} - x_\text{CPU}\|_2 / \|x_\text{CPU}\|_2$
+- Pointwise difference contour plots
 
-- Liquid level calculation for arbitrary fill volumes using `scipy.optimize.brentq`
-- Volume integrals for all 5 bottom styles (analytical where possible, numerical for torispherical)
-- Probe placement: 4 radial probes at 90 deg intervals + 2 axial probes
+**Convergence metrics:**
+- Per-solve iteration count time series (GPU vs CPU)
+- Per-solve final residual time series
+- Cumulative iteration count over N timesteps
 
-### 2.4 Case Generation Pipeline
+**Expected:** GPU and CPU solutions should agree to $O(10^{-12})$ or better for FP64 solvers (difference only from solver algorithm, not precision). Deviation beyond $O(10^{-6})$ indicates a bug.
 
-User inputs: reactor name, configuration, fill volume (L), RPM, density (kg/m^3), viscosity (Pa.s)
+### 5.3 Residual Convergence Comparison
 
-Generated case includes:
-- Background mesh (O-grid for cylindrical, hex for rectangular) with impeller zone
-- snappyHexMesh refinement around impeller and baffle STLs
-- Non-conformal coupling (NCC) for sliding mesh rotation
-- LES (WALE) or RANS (k-omega SST) turbulence
-- 10 function objects: field averaging, shear rate, EDR, forces, CoV, probes, volume averages, max shear, horizontal/vertical slice sampling
-- Tracer initialization (salt layer at bottom 10% of liquid level)
-- GPU or CPU solver configuration
-- Allrun/Allclean scripts
+Parse OpenFOAM log files and overlay:
 
-### 2.5 Post-Processing and Reporting
-
-- Parses forces log for torque → power → P/V → power number
-- Parses volFieldValue logs for CoV, average shear, average EDR, max shear
-- Computes TKE from time-averaged velocity fluctuations (UPrime2Mean)
-- VTK slice reader (pyvista) for field visualization
-- Interactive plotly figures: velocity colormaps, shear rate fields, tracer animation, strain rate histograms, time-series convergence plots
-- Self-contained HTML report (embedded plotly.js, dark theme, no external dependencies)
-
-### 2.6 CLI Interface
-
-```bash
-# List available reactors
-python -m mixfoam list
-
-# Show reactor details
-python -m mixfoam info Mobius_MIX 100L
-
-# Generate case
-python -m mixfoam setup Mobius_MIX 100L \
-    --volume 50 --rpm 200 \
-    --density 1000 --viscosity 0.001 \
-    --output ./my_case
-
-# Run simulation
-python -m mixfoam run ./my_case --parallel --nprocs 4
-
-# Post-process
-python -m mixfoam results ./my_case \
-    --rpm 200 --impeller-diameter 0.1 --volume 50
-
-# Generate HTML report
-python -m mixfoam report ./my_case --output report.html
+```
+For each field (p, Ux, Uy, Uz, k, epsilon, ...):
+  Plot: x-axis = outer iteration (or timestep)
+        y-axis = initial residual (log scale)
+  Series: CPU (solid), GPU-p (dashed), GPU-all-BJ (dotted), GPU-all-ILU (dash-dot)
 ```
 
-## 3. Illustrative Example (~500 words)
+This proves the GPU solver is not just fast but converges identically. Any divergence in residual trajectories is immediately visible and must be explained.
 
-### Setup
-- Reactor: Mobius_MIX 100L
-- Fill volume: 50 L, RPM: 200, water (rho=1000, mu=0.001)
-- LES WALE, 3mm target cell size, ~2.5M cells
+### 5.4 VTK Visualization Workflow
 
-### Workflow
-1. `mixfoam setup` — 15 seconds, generates 25 files
-2. `mixfoam run` — mesh (blockMesh + snappyHexMesh + topoSet + createNonConformalCouples), setFields, foamRun
-3. `mixfoam results` — prints EDR, P/V, Np, CoV, shear rates, TKE
-4. `mixfoam report` — 5.5 MB HTML file with 9 interactive plot sections
+**Per-case, per-variant:**
+1. Write VTK at key timesteps (foamToVTK or built-in function object)
+2. Load with pyvista, extract mid-plane slice
+3. Render: velocity magnitude, pressure, turbulence fields
+4. Compute pointwise difference: `diff = vtk_gpu.point_data['U'] - vtk_cpu.point_data['U']`
+5. Render difference field with diverging colormap (blue-white-red)
 
-### Sample Output (table)
+**Stirred tank specific:**
+- Horizontal slice at impeller height
+- Vertical slice through impeller axis
+- Tracer isosurface evolution (4 frames: t=0.1s, 0.5s, 1.0s, 2.0s)
 
-| Metric | Value | Unit |
-|--------|-------|------|
-| Energy dissipation rate (avg) | 0.45 | W/kg |
-| Power per volume | 450 | W/m^3 |
-| Power number | 4.8 | - |
-| Max shear rate | 12,500 | 1/s |
-| Avg shear rate | 85 | 1/s |
-| CoV (tracer, final) | 0.05 | - |
-| TKE | 0.012 | m^2/s^2 |
+**MotorBike specific:**
+- Surface pressure coefficient ($C_p$) on motorcycle body
+- Velocity magnitude on vertical centerplane
+- Wake vorticity isosurfaces
 
-*(Values are illustrative — actual values from simulation.)*
+### 5.5 Animation (Supplementary Material)
 
-## 4. Impact (~400 words)
-
-- Enables rapid parametric exploration of mixing conditions
-- Bridges gap between reactor design software (MixIT) and CFD (OpenFOAM)
-- Docker containerization enables deployment on cloud HPC (Rescale, AWS, Azure)
-- GPU acceleration (via companion solver module, see [Paper 1 reference]) enables LES studies that were previously CPU-limited
-- Open-source alternative to commercial mixing CFD tools
-- Extensible to new reactor families by adding XML configs and STLs
-
-## 5. Conclusions (~200 words)
-
-- MixFOAM automates the full CFD workflow for industrial mixing
-- 11 reactor families, 36 configurations out of the box
-- Comprehensive post-processing with interactive HTML reports
-- Available at: https://github.com/gogipav14/OpenFOAM-13
-
-## Figures (6 max)
-
-1. Software architecture diagram (module relationships + data flow)
-2. Reactor database overview: table/matrix of 11 families x key parameters
-3. Generated mesh example: blockMesh + snappyHexMesh refinement around impeller
-4. HTML report screenshot: velocity colormap + summary metrics dashboard
-5. Strain rate histogram from report (plotly figure)
-6. CLI workflow diagram: list → info → setup → run → results → report
+CPC allows supplementary multimedia. Generate:
+- Stirred tank tracer mixing animation (100 frames, mp4)
+- Side-by-side CPU vs GPU velocity field evolution
+- Residual convergence animation showing per-iteration progress
 
 ---
 
-# Timeline and Dependencies
+## 6. Figures (Planned, ~12-14)
 
-```
-Month 1-2:  Run benchmark cases (5 configurations x 6 solver settings)
-            Collect timing data, convergence histories, scaling results
+### Scaling and Performance (from existing data)
+1. **Speedup vs mesh size** -- 4 variants, 8 mesh sizes, log-log (hero figure)
+2. **ILU-BJ crossover analysis** -- bar chart of wall-time gap converging to crossover
+3. **Ux iteration comparison** -- BJ inflation vs ILU quality vs CPU symGS
+4. **GAMG iteration degradation** -- CPU GAMG vs GPU MG-PCG iteration count
+5. **mgCacheInterval sweep** -- step time vs interval (5, 10, 20, 40)
+6. **Step time breakdown** -- stacked bar: pressure solve, momentum solve, other
 
-Month 2-3:  Write Paper 1 (CPC) — GPU solver methods + benchmarks
-            Write Paper 2 (SoftwareX) — MixFOAM tool description
+### 3D Case Visualization (to be generated)
+7. **Stirred tank velocity field** -- mid-plane slice, CPU vs GPU side-by-side
+8. **GPU-CPU field difference** -- pointwise $|U_\text{GPU} - U_\text{CPU}|$ on mid-plane
+9. **Stirred tank tracer evolution** -- 4-panel time series
+10. **MotorBike pressure coefficient** -- surface $C_p$, CPU vs GPU
+11. **MotorBike wake streamlines** -- velocity streamlines in wake region
 
-Month 3:    Submit Paper 2 to SoftwareX (fast review)
-            Internal review of Paper 1
+### Convergence and Accuracy
+12. **Residual convergence overlay** -- per-field, CPU vs GPU (stirred tank)
+13. **Solution accuracy table** -- $L_\infty$, $L_2$ errors for all cases/variants
+14. **Per-solve iteration time series** -- pressure iterations over 100 timesteps
 
-Month 4:    Submit Paper 1 to CPC
-            Paper 2 review expected back (~9 weeks from submission)
-
-Month 5-6:  Paper 2 revisions + acceptance (expected)
-            Paper 1 under review at CPC
-
-Month 12-16: Paper 1 review back from CPC, revisions, acceptance
-```
-
-**Key dependency**: Paper 2 should reference Paper 1 as "submitted" or "in preparation" for the GPU solver details. Paper 1 references Paper 2 for the MixFOAM test case generation methodology.
+### Architecture Diagram
+15. **Software architecture** -- OGLSolverBase hierarchy + Ginkgo integration
 
 ---
 
-# Benchmarking Requirements (for Paper 1)
+## 7. Results and Discussion (Outline)
 
-## Hardware needed
-- 1x workstation with RTX 6000 Ada (or similar: A6000, A100)
-- 2x AMD EPYC (or Intel Xeon) for CPU baseline (32+ cores)
-- 4x GPUs for multi-GPU scaling test (Case E)
+### 7.1 Scaling Study (Case A: Cavity)
 
-## Software
-- Docker image (already prepared) with OpenFOAM 13 + Ginkgo + OGL
-- MixFOAM for automated case generation
+Present the full 40K-5M scaling table. Key findings:
 
-## Runs needed (~50 total)
+**GPU AMG-PCG pressure:**
+- Break-even at ~450K cells. Below this, PCIe overhead dominates.
+- 5.47x at 3M, 5.58x at 5M. Speedup not plateauing.
+- mgCacheInterval=10 gives +14.4% vs default (5). Interval=20 degrades at 5M.
 
-| Case | Mesh | Configurations | Timesteps | Est. GPU hours |
-|------|------|---------------|-----------|---------------|
-| A (2M) | 2M | 6 | 500 each | 6 |
-| B (8M) | 8M | 6 | 200 each | 24 |
-| C (3M) | 3M | 6 | 300 each | 9 |
-| D (5M) | 5M | 6 | 200 each | 18 |
-| E (20M) | 20M | 4 (scaling) | 100 each | 40 |
-| **Total** | | **28 runs** | | **~97 GPU-hours** |
+**GPU BiCGStab momentum -- BJ vs ILU-ISAI crossover:**
+- BJ iteration count grows superlinearly: 3.1 (40K) -> 10.6 (3M) -> 13.4 (5M)
+- ILU-ISAI iterations track CPU quality: 2.0 (40K) -> 6.7 (3M) -> 8.5 (5M)
+- Wall-time crossover at ~4.5M cells (ILU-ISAI setup cost amortized by iteration savings)
+- At 5M: ILU-ISAI 15.8% faster than BJ, 18.6% faster than GPU-p
 
-Plus ~200 CPU-hours for baselines.
+**GAMG superlinear degradation:**
+- CPU GAMG: 13 -> 66 -> 124 -> 152 iters (40K -> 1M -> 3M -> 5M)
+- GPU MG-PCG: 22 -> 44 -> 66 -> 44 (roughly linear, possibly sublinear)
+- At 5M, GAMG needs 3.5x more iterations than GPU MG
+
+### 7.2 3D Stirred Tank (Case B)
+
+Demonstrate that the scaling conclusions transfer to realistic 3D transient cases:
+- GPU speedup consistent with cavity scaling at equivalent cell count
+- Velocity and tracer fields visually identical between CPU and GPU
+- Quantitative field agreement: $L_\infty$ error < $10^{-10}$ (FP64)
+- No impact on physical solution quality (power number, mixing time)
+
+### 7.3 3D MotorBike (Case C)
+
+Large unstructured mesh with complex geometry:
+- Steady-state convergence: GPU and CPU reach same residual levels
+- Drag/lift coefficients match within solver tolerance
+- Performance at 2M-4M cells
+
+### 7.4 Negative Results (Honest Reporting)
+
+**Mixed-precision MG (FP32):**
+- Ginkgo v1.11.0 FP32 SpGEMM (used in MG hierarchy) is 3-8x slower than FP64
+- FP32 CG per-iteration ~2x slower
+- Net: FP32 MG produces worse wall time despite fewer bytes
+- Conclusion: consumer GPUs (FP64:FP32 = 1:64) cannot exploit mixed precision for AMG until sparse matrix kernels are optimized for FP32
+
+**Exact triangular solves (LowerTrs/UpperTrs):**
+- ILU with exact Trs cuts iterations 61% but wall time identical to BJ
+- Sequential forward/backward substitution is GPU-hostile
+- ISAI swap recovers parallelism; documented as essential for GPU ILU
+
+---
+
+## 8. Conclusions
+
+- GPU AMG-PCG achieves 5.47x speedup at 3M cells with convergence-gated hierarchy caching
+- ILU-ISAI delivers 6.85x at 5M cells, outperforming all other configurations
+- Preconditioner selection is mesh-size-dependent: BJ below 4.5M, ILU-ISAI above
+- GAMG iteration growth is superlinear and accelerates GPU advantage at scale
+- GPU MG iterations scale linearly, suggesting continued speedup improvement beyond 5M
+- Open-source, vendor-portable via Ginkgo (NVIDIA/AMD/Intel GPUs)
+- Code: https://github.com/gogipav14/OpenFOAM-13
+
+---
+
+## 9. References (Key, ~30-40 total)
+
+- Olenik et al. (2024) -- OGL base plugin [Meccanica]
+- Cojean et al. (2024) -- Ginkgo library [IJHPCA]
+- Piscaglia & Ghioldi (2023) -- amgx4Foam [Aerospace]
+- Anzt et al. (2022) -- ISAI for approximate triangular solves [SISC]
+- Chow & Patel (2015) -- Fine-grained parallel ILU for GPUs [SISC]
+- Trottenberg, Oosterlee & Schuller (2001) -- Multigrid [Academic Press]
+- Saad (2003) -- Iterative Methods for Sparse Linear Systems
+- Weller et al. (1998) -- OpenFOAM
+- Wendler et al. (2024) -- mixed precision FlowSimulator [Scipedia]
+- Carson & Higham (2018) -- adaptive precision in Krylov methods [SISC]
+- Stueben (2001) -- algebraic multigrid review [J. Comp. Appl. Math]
+
+---
+
+# Paper 2: MixFOAM (SoftwareX) -- Unchanged
+
+**Target:** SoftwareX (Elsevier)
+**Status:** 70% data ready. Needs one complete mixing simulation for illustrative example.
+
+*(Full outline retained from v1.0 -- see git history for details. No changes needed to Paper 2 strategy.)*
+
+### Remaining Work
+- Run one complete Mobius_MIX 100L case through full pipeline
+- Capture: EDR, power number, mixing time, shear rate distributions
+- Generate HTML report for paper screenshots
+- Record actual (not illustrative) metric values for Table 1
+
+---
+
+# Paper 3: GAMG Superlinear Degradation (Short Communication)
+
+**Target:** International Journal for Numerical Methods in Fluids (short communication)
+**Status:** 80% data ready. Needs GAMG sensitivity analysis.
+
+## Title
+
+> On the Superlinear Iteration Growth of Algebraic Multigrid in OpenFOAM: Implications for GPU-Accelerated Alternatives
+
+## Core Finding
+
+OpenFOAM's GAMG pressure solver exhibits superlinear iteration growth with mesh refinement on the pressure Poisson system:
+
+| Cells | GAMG iters | GPU MG iters | Ratio |
+|-------|-----------|-------------|-------|
+| 40K | 13.1 | 10.4 | 1.3x |
+| 360K | 30.2 | 19.6 | 1.5x |
+| 1M | 66.1 | 24.3 | 2.7x |
+| 3M | 122.7 | 37.8 | 3.2x |
+| 5M | 151.8 | 43.9 | 3.5x |
+
+GAMG iteration count roughly doubles per 3x mesh refinement (superlinear). GPU MG (Ginkgo PGM + Jacobi smoother) scales linearly. This divergence is the primary driver of GPU speedup at scale.
+
+## Remaining Work
+
+Before publishing this as a standalone finding:
+
+1. **GAMG sensitivity analysis:** Test with different agglomeration parameters (`nCellsInCoarsestLevel`, `agglomerator`, `nPreSweeps`, `nPostSweeps`). If GAMG degradation disappears with tuning, it's a configuration issue, not a fundamental finding.
+2. **3D verification:** Confirm the trend holds on 3D unstructured meshes (motorBike at 1M/2M/4M), not just 2D structured cavity.
+3. **Literature check:** Verify this isn't already reported in OpenFOAM community (CFD-online forums, OpenFOAM wiki, ESI release notes).
+
+If the finding survives scrutiny, this is a 4-6 page short communication with high practical impact for the OpenFOAM user community.
+
+---
+
+# Execution Plan: 3D Case Benchmarks + Visualization
+
+## Phase 1: Visualization Infrastructure (1-2 days)
+
+Build `benchmarks/compare_solutions.py`:
+
+```python
+# Core functions needed:
+def parse_residuals(log_file) -> dict[str, list[float]]
+    # Parse "Solving for Ux, Initial residual = ..." lines from OpenFOAM log
+
+def load_vtk_fields(case_dir, time) -> pyvista.MultiBlock
+    # Load VTK output at given timestep
+
+def compute_field_difference(vtk_a, vtk_b, field_name) -> pyvista.DataSet
+    # Pointwise difference with L_inf, L_2 norms
+
+def render_midplane_slice(vtk, field, normal, origin, output_path)
+    # pyvista screenshot of field on cutting plane
+
+def render_difference_map(vtk_diff, field, output_path)
+    # Diverging colormap (blue-white-red) for GPU-CPU difference
+
+def plot_residual_overlay(logs: dict[str, str], fields: list[str], output_path)
+    # Matplotlib: per-field residual convergence, one line per variant
+
+def plot_iteration_timeseries(logs: dict[str, str], field, output_path)
+    # Iteration count per solve call over simulation time
+
+def generate_accuracy_table(cases: list, variants: list) -> str
+    # LaTeX table of L_inf, L_2 errors for all combinations
+```
+
+Dependencies: `pyvista`, `matplotlib`, `numpy` (all available in Docker image or pip-installable).
+
+## Phase 2: Stirred Tank Benchmark (2-3 days)
+
+### 2a. Scale up mesh
+
+The base tutorial has 143K cells. For the paper we need 1-3M cells.
+
+**Option A:** Increase blockMesh resolution (double each direction: 143K -> ~1.1M)
+**Option B:** Add snappyHexMesh refinement levels around impeller
+
+Target: ~2M cells for a case that runs in reasonable time on RTX 5060.
+
+### 2b. Run 4 variants
+
+For each variant (CPU, GPU-p, GPU-all-BJ, GPU-all-ILU):
+1. Run 110 timesteps (10 warmup + 100 measured)
+2. Write VTK at timesteps 50, 75, 100, 110
+3. Capture full solver log
+
+### 2c. Generate figures
+
+From the runs:
+- Figure 7: Velocity magnitude on horizontal slice at impeller height
+- Figure 8: $|U_\text{GPU} - U_\text{CPU}|$ difference map
+- Figure 9: Tracer isosurface at 4 timepoints
+- Figure 12: Residual convergence overlay
+- Figure 14: Per-solve p iteration count over 100 timesteps
+
+### 2d. Accuracy table
+
+Compute $L_\infty$ and $L_2$ for U, p, tracer at t=final for all GPU variants vs CPU reference.
+
+## Phase 3: MotorBike Benchmark (2-3 days)
+
+### 3a. Mesh generation
+
+Run snappyHexMesh at 3 refinement levels targeting 1M, 2M, 4M cells.
+
+### 3b. Run 4 variants to steady state
+
+SIMPLE iterations until all residuals < 1e-5. Log total wall time and iteration counts.
+
+### 3c. Generate figures
+
+- Figure 10: Surface $C_p$ on motorcycle (CPU vs GPU)
+- Figure 11: Velocity streamlines in wake
+- Drag/lift coefficient convergence
+- Residual convergence comparison
+
+## Phase 4: GAMG Sensitivity (1 day)
+
+Test GAMG with varied parameters on the 2D cavity at 1M-3M cells:
+
+```
+agglomerator    faceAreaPair;
+nCellsInCoarsestLevel  10;   // default
+nCellsInCoarsestLevel  100;  // aggressive coarsening
+nCellsInCoarsestLevel  500;  // conservative coarsening
+smoother        GaussSeidel;  // default
+smoother        DIC;          // different smoother
+nPreSweeps      0;            // default
+nPreSweeps      1;            // more pre-smoothing
+```
+
+If iteration count is insensitive to tuning -> fundamental GAMG limitation -> Paper 3 is valid.
+If iteration count drops dramatically with tuning -> configuration issue -> Paper 3 is killed.
+
+---
+
+# Timeline
+
+```
+Week 1:   Build compare_solutions.py visualization pipeline
+          Run GAMG sensitivity analysis (go/no-go for Paper 3)
+
+Week 2:   Stirred tank benchmark (scale mesh, run 4 variants, VTK output)
+          Generate stirred tank figures (7-9, 12, 14)
+
+Week 3:   MotorBike benchmark (mesh generation, 4 variants, steady state)
+          Generate motorBike figures (10-11)
+          Compute accuracy tables for all cases
+
+Week 4:   Assemble Paper 1 draft (CPC format)
+          All figures finalized
+          Internal review
+
+Week 5:   Paper 1 revisions + submit to CPC
+          Start Paper 2 illustrative example (MixFOAM run)
+
+Week 6:   Paper 2 draft + submit to SoftwareX
+          Paper 3 draft (if GAMG finding holds)
+
+Week 8:   Paper 3 submit to IJNMF (if applicable)
+```
+
+**Key dependency:** Paper 2 references Paper 1 as "submitted" or "in preparation". Paper 1 references Paper 2 for MixFOAM case generation methodology.
+
+---
+
+# Hardware
+
+| Resource | Available | Required |
+|----------|-----------|----------|
+| GPU | RTX 5060, 8GB (Ada Lovelace) | Sufficient for all cases up to 5M cells |
+| CPU | Intel Core Ultra 5 225F | Sufficient for baselines |
+| Docker | ogl-dev container with OpenFOAM 13 + Ginkgo v1.11.0 | Ready |
+| Storage | Local SSD | ~50GB for VTK output across all cases |
+
+All benchmarks run on single workstation. No HPC cluster needed.
 
 ---
 
 # Differentiation from Prior Work
 
-## vs. Olenik et al. (2024) — base OGL [Meccanica]
+## vs. Olenik et al. (2024) -- base OGL [Meccanica]
 
-The published OGL provides:
-- LDU → CSR/COO/ELL conversion
-- Device-persistent data structures
-- Basic Ginkgo PCG integration
-- Multi-backend support (CUDA, HIP, SYCL)
+Published OGL provides: LDU->CSR conversion, device-persistent structures, basic Ginkgo CG/BiCGStab.
 
-**Our extensions (not in published OGL):**
-- Adaptive mixed-precision with 5 switching strategies
-- GPU-resident halo exchange (no host round-trips)
-- Bucket-based GPU memory pool with LRU eviction
-- Batched solver for multi-component fields
-- Performance timing instrumentation (10 categories)
-- Iterative refinement (FP32 inner solve + FP64 residual)
+**Our extensions:**
+- AMG preconditioning with convergence-gated caching (not in OGL)
+- ILU-ISAI preconditioner for asymmetric systems (not in OGL)
+- Preconditioner selection analysis with crossover identification (no prior work)
+- GAMG degradation finding (not reported anywhere)
 
 ## vs. amgx4Foam (Piscaglia, 2023) [Aerospace]
 
 - amgx4Foam is NVIDIA-only (AmgX has no AMD/Intel support)
 - Our approach is vendor-portable via Ginkgo
-- amgx4Foam uses AMG preconditioning; we use Jacobi (extensible to ILU/ISAI)
-- amgx4Foam does not have adaptive precision
+- amgx4Foam does not provide asymmetric momentum solver
+- amgx4Foam does not report preconditioner crossover analysis
+- No hierarchy caching strategy reported in amgx4Foam
 
-## vs. M-Star CFD (commercial)
+## vs. petsc4Foam [NextFOAM]
 
-- M-Star uses lattice Boltzmann method (LBM), not finite volume
-- M-Star is closed-source and commercial
-- MixFOAM is open-source, uses standard OpenFOAM
-- Finite volume enables broader turbulence model choices (LES, RANS, hybrid)
+- PETSc/HYPRE integration is more complex (heavyweight dependency)
+- No systematic preconditioner selection guidance reported
+- No GAMG comparison provided
 
-## vs. CaseFoam / OpenFOAMCaseGenerator
+---
 
-- Domain-agnostic tools; no knowledge of reactor geometry or mixing metrics
-- No STL extraction, no tank volume calculations, no mixing-specific function objects
-- No post-processing or visualization pipeline
-- No Docker containerization
+# Data Inventory (What Exists vs What's Needed)
+
+## Exists (ready for Paper 1)
+
+| Dataset | Location | Content |
+|---------|----------|---------|
+| 2D cavity scaling (200-1732) | `benchmarks/bicgstab_results_ilu_isai/` | 4 variants, 6 mesh sizes, 20 steps |
+| 2D cavity crossover (2000-2236) | `benchmarks/bicgstab_results_crossover/` | 4 variants, 2 mesh sizes, 10 steps |
+| MG cache interval sweep | `benchmarks/mg_cache_sweep/` | intervals 5/10/20/40, 1M cells |
+| ILU Trs vs ISAI comparison | `benchmarks/bicgstab_results_ilu/` | Trs bottleneck documented |
+| Scaling analysis plots | `benchmarks/bicgstab_results_crossover/crossover_analysis.png` | 6-panel figure |
+
+## Needed (for Paper 1 submission)
+
+| Dataset | Effort | Purpose |
+|---------|--------|---------|
+| 3D stirred tank (4 variants, 100 steps, VTK) | 2-3 days | Industrial validation + visualization |
+| 3D motorBike (4 variants, steady state, 3 meshes) | 2-3 days | Unstructured mesh validation |
+| compare_solutions.py pipeline | 1 day | Automated figure generation |
+| Accuracy tables ($L_\infty$, $L_2$) | 1 hour | Quantitative GPU-CPU agreement |
+| GAMG sensitivity analysis | 1 day | Paper 3 go/no-go |

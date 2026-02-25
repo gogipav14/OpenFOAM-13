@@ -78,6 +78,7 @@ SourceFiles
 
 #include "OGLSolverBase.H"
 #include "CylFFTPreconditioner.H"
+#include "DICPreconditioner.H"
 
 #include "GinkgoCompat.H"
 #include <map>
@@ -99,6 +100,13 @@ class OGLCylindricalSolver
     public OGLSolverBase
 {
     // Private Types
+
+        //- Fallback preconditioner for non-zone cells
+        enum FallbackType
+        {
+            JACOBI,
+            DIC
+        };
 
         //- Cache entry for persisting GPU state across solver instantiations
         struct CylCache
@@ -129,6 +137,12 @@ class OGLCylindricalSolver
         //- Whether zone mode is active
         bool useZone_;
 
+        //- Fallback preconditioner type for non-zone cells
+        FallbackType fallbackType_;
+
+        //- DIC reciprocal diagonal (recomputed each solve call)
+        mutable scalarField rDDIC_;
+
         //- Detected cylindrical grid dimensions
         mutable label nr_;       // radial cells
         mutable label ntheta_;   // angular cells
@@ -152,6 +166,52 @@ class OGLCylindricalSolver
         //- Whether coefficients have been initialized
         mutable bool coeffsInitialized_;
 
+        // --- Capacitance (Woodbury) correction data ---
+
+        //- Number of defect angular faces (rank of correction)
+        mutable label capK_;
+
+        //- Structured indices of defect face cell pairs
+        //  capCellA_[f], capCellB_[f]: structured indices for defect face f
+        mutable labelList capCellA_;
+        mutable labelList capCellB_;
+
+        //- Coupling coefficient that M assumes but A lacks (per defect face)
+        mutable scalarList capCoeffs_;
+
+        //- W = M^{-1} U precomputed columns (capK_ columns of length nStruct)
+        mutable scalarList capW_;
+
+        //- Factored capacitance matrix S^{-1} (capK_ x capK_ dense)
+        mutable scalarList capSinv_;
+
+        //- Whether capacitance correction is active
+        mutable bool capValid_;
+
+        // --- Per-sector DCT mode ---
+
+        //- Whether to use per-sector DCT instead of global DFT+Woodbury
+        bool useSectorDCT_;
+
+        //- Number of angular sectors (= number of blade walls)
+        mutable label nSectors_;
+
+        //- Angular cells per sector
+        mutable label nthetaSector_;
+
+        //- Sector start theta indices (theta index of first cell in each sector)
+        //  sectorStarts_[s] = first theta index of sector s
+        mutable labelList sectorStarts_;
+
+        //- Permutation: structured index -> sector-ordered index
+        //  Sector-ordered: data[(s*nr + ir)*nthetaSector + itheta_local]
+        mutable labelList structToSector_;
+
+        //- Inverse permutation: sector-ordered -> structured index
+        mutable labelList sectorToStruct_;
+
+        //- Whether sector detection has been done
+        mutable bool sectorsDetected_;
 
     // Private Member Functions
 
@@ -164,9 +224,39 @@ class OGLCylindricalSolver
         //  and update the cylindrical preconditioner's Thomas factors.
         void extractCylindricalCoeffs() const;
 
+        //- Build capacitance matrix for Woodbury blade-wall correction.
+        //  Identifies angular faces where the actual coupling differs from
+        //  the mean, precomputes W = M^{-1}*U, and factors the k×k
+        //  capacitance matrix S = C_diag^{-1} + U^T*W.
+        void buildCapacitanceMatrix() const;
+
+        //- Apply spectral solve to a single column (CPU-side helper)
+        void applySpectralColumn
+        (
+            scalarField& z,
+            const scalarField& r
+        ) const;
+
         //- Apply cylindrical preconditioner: gather -> DFT+Thomas -> scatter
         template<typename ValueType>
         void applyCylPrecond
+        (
+            scalarField& z,
+            const scalarField& r,
+            std::shared_ptr<CylFFTPreconditioner<ValueType>>& precond
+        ) const;
+
+        //- Detect sector boundaries from blade-wall face detection.
+        //  Uses the pairExists data from extractCylindricalCoeffs().
+        //  Populates nSectors_, nthetaSector_, sectorStarts_, and
+        //  structToSector_/sectorToStruct_ permutations.
+        void detectSectors() const;
+
+        //- Apply per-sector DCT preconditioner: gather to sector-ordered
+        //  layout -> DCT+Thomas per sector -> scatter back.
+        //  No Woodbury correction needed.
+        template<typename ValueType>
+        void applyCylPrecondSector
         (
             scalarField& z,
             const scalarField& r,

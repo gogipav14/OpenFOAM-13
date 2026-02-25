@@ -87,13 +87,31 @@ protected:
         const ValueType* b_ptr = dense_b->get_const_values();
         ValueType* x_ptr = dense_x->get_values();
 
-        if constexpr (std::is_same<ValueType, float>::value)
+        if (sectorMode_)
         {
-            cylFFTPrecondApplyFloat(handle_, b_ptr, x_ptr, totalCells_);
+            if constexpr (std::is_same<ValueType, float>::value)
+            {
+                cylFFTPrecondApplySectorFloat(
+                    handle_, b_ptr, x_ptr, totalCells_);
+            }
+            else
+            {
+                cylFFTPrecondApplySectorDouble(
+                    handle_, b_ptr, x_ptr, totalCells_);
+            }
         }
         else
         {
-            cylFFTPrecondApplyDouble(handle_, b_ptr, x_ptr, totalCells_);
+            if constexpr (std::is_same<ValueType, float>::value)
+            {
+                cylFFTPrecondApplyFloat(
+                    handle_, b_ptr, x_ptr, totalCells_);
+            }
+            else
+            {
+                cylFFTPrecondApplyDouble(
+                    handle_, b_ptr, x_ptr, totalCells_);
+            }
         }
     }
 
@@ -126,10 +144,11 @@ protected:
     :
         gko::EnableLinOp<CylFFTPreconditioner>(exec),
         handle_(nullptr),
-        totalCells_(0)
+        totalCells_(0),
+        sectorMode_(false)
     {}
 
-    // Construct with cylindrical grid dimensions
+    // Construct with cylindrical grid dimensions (DFT mode)
     CylFFTPreconditioner
     (
         std::shared_ptr<const gko::Executor> exec,
@@ -138,16 +157,34 @@ protected:
     )
     :
         gko::EnableLinOp<CylFFTPreconditioner>(exec, size),
-        totalCells_(nr * ntheta)
+        totalCells_(nr * ntheta),
+        sectorMode_(false)
     {
         int useFloat = std::is_same<ValueType, float>::value ? 1 : 0;
         handle_ = cylFFTPrecondCreate(nr, ntheta, useFloat);
     }
 
+    // Construct with per-sector DCT dimensions
+    CylFFTPreconditioner
+    (
+        std::shared_ptr<const gko::Executor> exec,
+        gko::dim<2> size,
+        int nr, int nSectors, int nthetaSector
+    )
+    :
+        gko::EnableLinOp<CylFFTPreconditioner>(exec, size),
+        totalCells_(nr * nSectors * nthetaSector),
+        sectorMode_(true)
+    {
+        int useFloat = std::is_same<ValueType, float>::value ? 1 : 0;
+        handle_ = cylFFTPrecondCreateSector(
+            nr, nSectors, nthetaSector, useFloat);
+    }
+
 
 public:
 
-    // Set tridiagonal coefficients from actual FV matrix couplings
+    // Set tridiagonal coefficients from actual FV matrix couplings (DFT mode)
     void setCoeffs
     (
         const double* lower,
@@ -161,11 +198,26 @@ public:
         }
     }
 
+    // Set tridiagonal coefficients for per-sector DCT mode
+    void setCoeffsSector
+    (
+        const double* lower,
+        const double* upper,
+        const double* thetaCoeff
+    )
+    {
+        if (handle_)
+        {
+            cylFFTPrecondSetCoeffsSector(handle_, lower, upper, thetaCoeff);
+        }
+    }
+
 
 private:
 
     CylFFTHandle handle_;
     int totalCells_;
+    bool sectorMode_;
 };
 
 

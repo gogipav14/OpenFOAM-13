@@ -47,11 +47,11 @@ Description
         Extended grid: 2nz * 2ny * 2nx (or nz if nz==1)
         cuFFT: n = {ez, ey, ex} where ex = 2*nx, etc.
 
-    Status: Eigenmode self-test passes (100% match), but the preconditioner
-    does not yet improve CG convergence on real pressure systems. The likely
-    cause is mismatch between the idealized Neumann Laplacian and the actual
-    FV pressure operator (variable rAU, boundary stencils). Parked for now;
-    Block Jacobi is used as the production preconditioner.
+    CUDA stream note: fftPrecondApplyFloat/Double call cudaDeviceSynchronize()
+    after kernel launches. This is required because cuFFT and custom kernels
+    run on the default stream (stream 0), while Ginkgo's CG solver may
+    operate on a different CUDA stream. Without synchronization, Ginkgo
+    reads stale data from the output buffer, causing CG to diverge.
 
 \*---------------------------------------------------------------------------*/
 
@@ -92,6 +92,10 @@ struct FFTPrecondState
     // Work buffers for the extended grid
     void* complexBuf;        // size complexSize * sizeof(complex)
     void* realBuf;           // size extendedCells * sizeof(real)
+
+    // Null mode projection: sum buffer for parallel reduction (1 element)
+    float*  d_sumFloat;
+    double* d_sumDouble;
 };
 
 
@@ -255,6 +259,53 @@ __global__ void scaleRealD(double* data, double scale, int n)
     data[idx] *= scale;
 }
 
+// -------------------------------------------------------------------------
+// Null mode projection kernels
+//
+// The Neumann Laplacian has a null space (constant vectors). The FFT
+// preconditioner sets invEig[0,0,0] = 0 to avoid division by zero, but
+// the even-extension + R2C/C2R pipeline doesn't perfectly annihilate the
+// [0,0,0] mode — constant-mode leakage contaminates the output.
+//
+// This is analogous to the NILT paper's epsilon_Im metric (imaginary
+// leakage): if the transform pipeline isn't spectrally clean, residual
+// energy in the null mode accumulates over CG iterations and corrupts
+// the Krylov subspace, causing intermittent divergence.
+//
+// Fix: project out the null mode after each apply: z = z - mean(z).
+// -------------------------------------------------------------------------
+
+// Block-level parallel reduction with shared memory + atomicAdd
+template <typename T>
+__global__ void blockReduceSumKernel(const T* data, T* result, int n)
+{
+    extern __shared__ char smem[];
+    T* sdata = reinterpret_cast<T*>(smem);
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    sdata[tid] = (idx < n) ? data[idx] : T(0);
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+
+    if (tid == 0) atomicAdd(result, sdata[0]);
+}
+
+// Subtract mean from every element: data[i] -= (*sum) / n
+template <typename T>
+__global__ void subtractMeanKernel(T* data, const T* sum, T invN, int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    data[idx] -= (*sum) * invN;
+}
+
 
 // -------------------------------------------------------------------------
 // API implementation
@@ -288,6 +339,8 @@ FFTPrecondHandle fftPrecondCreate(
     s->invEigDouble = nullptr;
     s->complexBuf = nullptr;
     s->realBuf = nullptr;
+    s->d_sumFloat = nullptr;
+    s->d_sumDouble = nullptr;
     s->planR2C_f = 0;
     s->planC2R_f = 0;
     s->planD2Z = 0;
@@ -337,6 +390,7 @@ FFTPrecondHandle fftPrecondCreate(
         cudaMalloc(&s->invEigFloat, s->complexSize * sizeof(float));
         cudaMalloc(&s->complexBuf, s->complexSize * sizeof(cufftComplex));
         cudaMalloc(&s->realBuf, s->extendedCells * sizeof(float));
+        cudaMalloc(&s->d_sumFloat, sizeof(float));
 
         // Compute initial eigenvalues using geometric coefficients
         float geoCoeffX = (float)(dy * dz / dx);
@@ -384,6 +438,7 @@ FFTPrecondHandle fftPrecondCreate(
         cudaMalloc(&s->complexBuf,
             s->complexSize * sizeof(cufftDoubleComplex));
         cudaMalloc(&s->realBuf, s->extendedCells * sizeof(double));
+        cudaMalloc(&s->d_sumDouble, sizeof(double));
 
         double geoCoeffX = dy * dz / dx;
         double geoCoeffY = dx * dz / dy;
@@ -421,6 +476,8 @@ void fftPrecondDestroy(FFTPrecondHandle h)
 
     if (h->complexBuf) cudaFree(h->complexBuf);
     if (h->realBuf) cudaFree(h->realBuf);
+    if (h->d_sumFloat) cudaFree(h->d_sumFloat);
+    if (h->d_sumDouble) cudaFree(h->d_sumDouble);
 
     delete h;
 }
@@ -503,6 +560,27 @@ void fftPrecondApplyFloat(
 
     float scale = 1.0f / (float)h->extendedCells;
     scaleRealF<<<origBlocks, threads>>>(x_ptr, scale, n);
+
+    // 6. Null mode projection: z = z - mean(z)
+    //    Projects out the constant (null space) component that leaks through
+    //    the even-extension + R2C/C2R pipeline despite invEig[0,0,0] = 0.
+    cudaMemset(h->d_sumFloat, 0, sizeof(float));
+    blockReduceSumKernel<float><<<origBlocks, threads, threads * sizeof(float)>>>(
+        x_ptr, h->d_sumFloat, n
+    );
+    subtractMeanKernel<float><<<origBlocks, threads>>>(
+        x_ptr, h->d_sumFloat, 1.0f / (float)n, n
+    );
+
+    // Synchronize to ensure FFT results are visible to all CUDA streams.
+    // cuFFT and custom kernels run on the default stream (stream 0), but
+    // Ginkgo's CG may operate on a different CUDA stream. Without this
+    // sync, CG reads stale/uninitialized data from x_ptr, causing
+    // divergence (3000+ iterations instead of <20).
+    //
+    // TODO: For better performance, use cufftSetStream() to run cuFFT on
+    // Ginkgo's executor stream, eliminating the need for global sync.
+    cudaDeviceSynchronize();
 }
 
 
@@ -548,4 +626,16 @@ void fftPrecondApplyDouble(
 
     double scale = 1.0 / (double)h->extendedCells;
     scaleRealD<<<origBlocks, threads>>>(x_ptr, scale, n);
+
+    // 6. Null mode projection: z = z - mean(z)
+    cudaMemset(h->d_sumDouble, 0, sizeof(double));
+    blockReduceSumKernel<double><<<origBlocks, threads, threads * sizeof(double)>>>(
+        x_ptr, h->d_sumDouble, n
+    );
+    subtractMeanKernel<double><<<origBlocks, threads>>>(
+        x_ptr, h->d_sumDouble, 1.0 / (double)n, n
+    );
+
+    // Synchronize to ensure FFT results are visible to all CUDA streams.
+    cudaDeviceSynchronize();
 }

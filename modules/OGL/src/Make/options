@@ -28,7 +28,7 @@ LIB_LIBS = \
     -L$(GINKGO_DIR)/lib \
     -lginkgo \
     -Wl,-rpath,$(GINKGO_DIR)/lib \
-    -L$(GINKGO_DIR)/lib -lfftprecond -lcylprecond -lhalokernel \
+    -L$(GINKGO_DIR)/lib -lfftprecond -lcylprecond -lhalokernel -lmgkernels \
     -Wl,-rpath,$(GINKGO_DIR)/lib \
     -L$(CUDA_DIR)/lib64 -lcufft -lcudart \
     -Wl,-rpath,$(CUDA_DIR)/lib64

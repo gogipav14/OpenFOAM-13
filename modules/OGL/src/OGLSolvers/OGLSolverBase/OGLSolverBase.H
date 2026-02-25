@@ -91,8 +91,14 @@ public:
             BJ_ISAI_GMRES,       // Multiplicative: ISAI * BJ (GMRES)
             BJ_ISAI_INNER_OUTER, // FGMRES outer + CG-BJ inner precond
             FFT,                 // FFT Laplacian preconditioner (structured)
+            FFT_DIRECT,          // FFT direct spectral solve (Richardson iter)
             FFT_BLOCK_JACOBI,    // FFT + Block Jacobi additive (structured)
+            FFT_CHEBYSHEV,       // Chebyshev(FFT) polynomial preconditioner
+            FFT_SCALED,          // D^{-1/2} * FFT * D^{-1/2} scaled precond
+            FFT_BJ_VCYCLE,       // 2-level V-cycle: BJ-smooth, FFT-coarse (CG)
+            GEOMETRIC_MG_FFT,    // Geometric MG V-cycle + FFT coarsest (CG)
             MULTIGRID,           // AMG via Ginkgo Multigrid (PGM coarsening)
+            MULTIGRID_FFT,       // AMG + FFT additive composite
             ILU                  // Parallel incomplete LU (asymmetric)
         };
 
@@ -142,6 +148,27 @@ protected:
 
         //- Sparsity power for ISAI preconditioner
         label isaiSparsityPower_;
+
+        //- Chebyshev degree for FFT_CHEBYSHEV preconditioner
+        label chebyDegree_;
+
+        //- Chebyshev eigenvalue lower bound (of FFT^{-1}*A)
+        scalar chebyEigMin_;
+
+        //- Chebyshev eigenvalue upper bound (of FFT^{-1}*A)
+        scalar chebyEigMax_;
+
+        //- V-cycle pre-smooth iterations (must equal postSmooth for CG symmetry)
+        label vcyclePreSmooth_;
+
+        //- V-cycle post-smooth iterations
+        label vcyclePostSmooth_;
+
+        //- V-cycle Chebyshev polynomial degree per smooth
+        label vcycleChebDegree_;
+
+        //- V-cycle smoother type ("chebyshev" or "blockJacobi")
+        word vcycleSmoother_;
 
         //- Grid dimensions for FFT preconditioner (nx, ny, nz)
         Vector<label> fftDimensions_;

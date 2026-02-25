@@ -145,6 +145,132 @@ private:
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
+/*---------------------------------------------------------------------------*\
+    Class DefectCorrectionLinOp Declaration
+\*---------------------------------------------------------------------------*/
+
+// Multiplicative (defect correction) preconditioner:
+//     apply(r, z) computes z = P1(r) + P2(r - A*P1(r))
+//
+// P1 pre-smooths, then P2 corrects the remaining defect.
+// More effective than additive when one component (P1) is approximate.
+// Not exactly symmetric; works well with CG in practice but FGMRES
+// is theoretically preferred.
+
+template <typename ValueType>
+class DefectCorrectionLinOp
+:
+    public gko::EnableLinOp<DefectCorrectionLinOp<ValueType>>,
+    public gko::EnableCreateMethod<DefectCorrectionLinOp<ValueType>>
+{
+    friend class gko::EnablePolymorphicObject<
+        DefectCorrectionLinOp, gko::LinOp
+    >;
+    friend class gko::EnableCreateMethod<DefectCorrectionLinOp>;
+
+public:
+
+    using value_type = ValueType;
+
+
+protected:
+
+    void apply_impl(const gko::LinOp* b, gko::LinOp* x) const override
+    {
+        auto exec = this->get_executor();
+        auto dense_b =
+            gko::as<gko::matrix::Dense<ValueType>>(b);
+        auto dense_x =
+            gko::as<gko::matrix::Dense<ValueType>>(x);
+
+        // z1 = P1(r)
+        auto z1 = gko::matrix::Dense<ValueType>::create(
+            exec, dense_x->get_size()
+        );
+        preSmoother_->apply(b, z1.get());
+
+        // defect = r - A * z1
+        auto defect = gko::matrix::Dense<ValueType>::create(
+            exec, dense_b->get_size()
+        );
+        defect->copy_from(dense_b);
+        auto neg_one = gko::initialize<gko::matrix::Dense<ValueType>>(
+            {ValueType{-1.0}}, exec
+        );
+        auto one = gko::initialize<gko::matrix::Dense<ValueType>>(
+            {ValueType{1.0}}, exec
+        );
+        systemMatrix_->apply(neg_one, z1.get(), one, defect.get());
+
+        // correction = P2(defect)
+        corrector_->apply(defect.get(), dense_x);
+
+        // z = z1 + correction
+        dense_x->add_scaled(one, z1);
+    }
+
+    void apply_impl
+    (
+        const gko::LinOp* alpha,
+        const gko::LinOp* b,
+        const gko::LinOp* beta,
+        gko::LinOp* x
+    ) const override
+    {
+        auto exec = this->get_executor();
+        auto dense_x =
+            gko::as<gko::matrix::Dense<ValueType>>(x);
+
+        // temp = apply(b)
+        auto temp = gko::matrix::Dense<ValueType>::create(
+            exec, dense_x->get_size()
+        );
+        this->apply_impl(b, temp.get());
+
+        // x = alpha * temp + beta * x
+        auto dense_alpha =
+            gko::as<gko::matrix::Dense<ValueType>>(alpha);
+        auto dense_beta =
+            gko::as<gko::matrix::Dense<ValueType>>(beta);
+        dense_x->scale(dense_beta);
+        dense_x->add_scaled(dense_alpha, temp);
+    }
+
+    // Default constructor
+    explicit DefectCorrectionLinOp(
+        std::shared_ptr<const gko::Executor> exec
+    )
+    :
+        gko::EnableLinOp<DefectCorrectionLinOp>(exec)
+    {}
+
+    // Construct from system matrix and two operators
+    DefectCorrectionLinOp
+    (
+        std::shared_ptr<const gko::LinOp> systemMatrix,
+        std::shared_ptr<const gko::LinOp> preSmoother,
+        std::shared_ptr<const gko::LinOp> corrector
+    )
+    :
+        gko::EnableLinOp<DefectCorrectionLinOp>(
+            preSmoother->get_executor(), preSmoother->get_size()
+        ),
+        systemMatrix_(std::move(systemMatrix)),
+        preSmoother_(std::move(preSmoother)),
+        corrector_(std::move(corrector))
+    {}
+
+
+private:
+
+    std::shared_ptr<const gko::LinOp> systemMatrix_;
+    std::shared_ptr<const gko::LinOp> preSmoother_;
+    std::shared_ptr<const gko::LinOp> corrector_;
+};
+
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
 } // End namespace OGL
 } // End namespace Foam
 

@@ -55,6 +55,8 @@ Description
 
 #include "GinkgoCompat.H"
 #include "FFTKernels.h"
+#include <cuda_runtime.h>
+#include <cstdio>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -100,6 +102,33 @@ protected:
         const ValueType* b_ptr = dense_b->get_const_values();
         ValueType* x_ptr = dense_x->get_values();
 
+        // One-shot diagnostic: verify apply_impl is called and data is valid
+        if (applyCallCount_ == 0)
+        {
+            auto bSize = dense_b->get_size();
+            auto xSize = dense_x->get_size();
+            fprintf(stderr,
+                "FFTPrecond::apply_impl CALLED: b=[%zu x %zu] x=[%zu x %zu]"
+                " totalCells=%d handle=%p b_ptr=%p x_ptr=%p\n",
+                bSize[0], bSize[1], xSize[0], xSize[1],
+                totalCells_, (void*)handle_, (const void*)b_ptr, (void*)x_ptr);
+
+            // Check input/output norms via GPU reduction (one-shot)
+            if (b_ptr && x_ptr && totalCells_ > 0)
+            {
+                // Copy first 5 elements of b to check they're nonzero
+                ValueType bSample[5] = {};
+                int nSample = (totalCells_ < 5) ? totalCells_ : 5;
+                cudaMemcpy(bSample, b_ptr, nSample * sizeof(ValueType),
+                           cudaMemcpyDeviceToHost);
+                fprintf(stderr,
+                    "FFTPrecond::apply_impl b[0..4] = %e %e %e %e %e\n",
+                    (double)bSample[0], (double)bSample[1],
+                    (double)bSample[2], (double)bSample[3],
+                    (double)bSample[4]);
+            }
+        }
+
         // Dispatch to correct precision
         if constexpr (std::is_same<ValueType, float>::value)
         {
@@ -109,6 +138,22 @@ protected:
         {
             fftPrecondApplyDouble(handle_, b_ptr, x_ptr, totalCells_);
         }
+
+        // One-shot diagnostic: check output after first apply
+        // (fftPrecondApply now includes cudaDeviceSynchronize internally)
+        if (applyCallCount_ == 0 && x_ptr && totalCells_ > 0)
+        {
+            ValueType xSample[5] = {};
+            int nSample = (totalCells_ < 5) ? totalCells_ : 5;
+            cudaMemcpy(xSample, x_ptr, nSample * sizeof(ValueType),
+                       cudaMemcpyDeviceToHost);
+            fprintf(stderr,
+                "FFTPrecond::apply_impl z[0..4] = %e %e %e %e %e\n",
+                (double)xSample[0], (double)xSample[1],
+                (double)xSample[2], (double)xSample[3],
+                (double)xSample[4]);
+        }
+        applyCallCount_++;
     }
 
     void apply_impl
@@ -178,6 +223,7 @@ private:
 
     FFTPrecondHandle handle_;
     int totalCells_;
+    mutable int applyCallCount_ = 0;
 };
 
 

@@ -122,6 +122,65 @@ void cylFFTPrecondApplyDouble(
     int n
 );
 
+
+/* ---- Per-sector DCT (Neumann boundary) API ---- */
+
+/*
+ * Create per-sector DCT preconditioner.
+ *
+ * For meshes with blade walls that break angular periodicity, each sector
+ * between consecutive blades is an independent sub-problem with Neumann
+ * (zero-flux) BCs at the blade boundaries. DCT-II naturally encodes
+ * Neumann BCs, eliminating the need for Woodbury correction.
+ *
+ * nr:            number of radial cells
+ * nSectors:      number of angular sectors (= number of blade walls)
+ * nthetaSector:  angular cells per sector (all sectors must be same size)
+ * useFloat:      1 for float (FP32), 0 for double (FP64)
+ *
+ * Data layout: sectors concatenated, each sector r-major.
+ *   data[(s * nr + i_r) * nthetaSector + i_theta_local]
+ *
+ * Returns handle, or NULL on failure.
+ */
+CylFFTHandle cylFFTPrecondCreateSector(
+    int nr, int nSectors, int nthetaSector,
+    int useFloat
+);
+
+/*
+ * Set tridiagonal coefficients for per-sector DCT mode.
+ * Same interface as cylFFTPrecondSetCoeffs. Internally uses DCT-II
+ * eigenvalues: eigenTheta[m] = 2*(1 - cos(pi*m/nthetaSector)).
+ */
+void cylFFTPrecondSetCoeffsSector(
+    CylFFTHandle h,
+    const double* lower,
+    const double* upper,
+    const double* thetaCoeff
+);
+
+/*
+ * Apply per-sector DCT preconditioner in single precision.
+ * n = nSectors * nr * nthetaSector.
+ */
+void cylFFTPrecondApplySectorFloat(
+    CylFFTHandle h,
+    const float* b_ptr,
+    float* x_ptr,
+    int n
+);
+
+/*
+ * Apply per-sector DCT preconditioner in double precision.
+ */
+void cylFFTPrecondApplySectorDouble(
+    CylFFTHandle h,
+    const double* b_ptr,
+    double* x_ptr,
+    int n
+);
+
 #ifdef __cplusplus
 }
 #endif
