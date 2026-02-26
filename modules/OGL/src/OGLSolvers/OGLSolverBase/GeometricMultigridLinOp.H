@@ -93,6 +93,10 @@ public:
     }
 
     // Factory method: build the full multigrid hierarchy
+    //
+    // coarseSolverType: "fft" (DCT direct solve) or "chebyshev" (polynomial)
+    // coarseChebDegree: degree for Chebyshev coarsest solver (only used if
+    //                   coarseSolverType == "chebyshev", default 20)
     static std::shared_ptr<GeometricMultigridLinOp> createHierarchy(
         std::shared_ptr<const gko::Executor> exec,
         std::shared_ptr<const gko::LinOp> fineMatrix,
@@ -102,7 +106,9 @@ public:
         int blockSize,
         const std::string& smootherType,
         int chebDegree,
-        int debug
+        int debug,
+        const std::string& coarseSolverType = "fft",
+        int coarseChebDegree = 20
     )
     {
         auto nCells = static_cast<gko::size_type>(nx * ny * nz);
@@ -122,13 +128,20 @@ public:
         dims_ny.push_back(cny);
         dims_nz.push_back(cnz);
 
-        while (std::min({cnx, cny, cnz}) >= 8
-               && cnx * cny * cnz > 1000
-               && cnx % 2 == 0 && cny % 2 == 0 && cnz % 2 == 0)
+        while (true)
         {
-            cnx /= 2;
-            cny /= 2;
-            cnz /= 2;
+            // Ceiling division: (n+1)/2 ensures every fine cell maps to
+            // a coarse cell, eliminating orphan cells that break R ∝ P^T
+            // symmetry required by CG.  The restriction kernel handles
+            // partial blocks (count < 8) via boundary checks.
+            int hnx = (cnx + 1) / 2;
+            int hny = (cny + 1) / 2;
+            int hnz = (cnz + 1) / 2;
+            if (std::min({hnx, hny, hnz}) < 4 || hnx * hny * hnz < 100)
+                break;
+            cnx = hnx;
+            cny = hny;
+            cnz = hnz;
             dims_nx.push_back(cnx);
             dims_ny.push_back(cny);
             dims_nz.push_back(cnz);
@@ -217,6 +230,21 @@ public:
             if (nxNeigh > 0) hCoeffX[row] /= ValueType(nxNeigh);
             if (nyNeigh > 0) hCoeffY[row] /= ValueType(nyNeigh);
             if (nzNeigh > 0) hCoeffZ[row] /= ValueType(nzNeigh);
+        }
+
+        if (debug >= 1)
+        {
+            // Print fine-level mean coefficients for reference
+            double mX = 0, mY = 0, mZ = 0;
+            for (gko::size_type i = 0; i < nCells; i++)
+            {
+                mX += hCoeffX[i]; mY += hCoeffY[i]; mZ += hCoeffZ[i];
+            }
+            mX /= nCells; mY /= nCells; mZ /= nCells;
+            fprintf(stderr,
+                "GeometricMG level 0: %dx%dx%d = %lu cells,"
+                " mean coeffs=(%.4e,%.4e,%.4e)\n",
+                nx, ny, nz, (unsigned long)nCells, mX, mY, mZ);
         }
 
         // Build levels
@@ -370,14 +398,30 @@ public:
 
             if (debug >= 1)
             {
+                // Print mean coefficient values for this level
+                std::vector<ValueType> dbgX(Lc.nCells), dbgY(Lc.nCells),
+                    dbgZ(Lc.nCells);
+                cudaMemcpy(dbgX.data(), Lc.d_coeffX,
+                    Lc.nCells * sizeof(ValueType), cudaMemcpyDeviceToHost);
+                cudaMemcpy(dbgY.data(), Lc.d_coeffY,
+                    Lc.nCells * sizeof(ValueType), cudaMemcpyDeviceToHost);
+                cudaMemcpy(dbgZ.data(), Lc.d_coeffZ,
+                    Lc.nCells * sizeof(ValueType), cudaMemcpyDeviceToHost);
+                double mX = 0, mY = 0, mZ = 0;
+                for (int i = 0; i < Lc.nCells; i++)
+                {
+                    mX += dbgX[i]; mY += dbgY[i]; mZ += dbgZ[i];
+                }
+                mX /= Lc.nCells; mY /= Lc.nCells; mZ /= Lc.nCells;
                 fprintf(stderr,
                     "GeometricMG level %d: %dx%dx%d = %d cells,"
-                    " nnz=%d\n",
-                    l, Lc.nx, Lc.ny, Lc.nz, Lc.nCells, nnz);
+                    " nnz=%d, mean coeffs=(%.4e,%.4e,%.4e)\n",
+                    l, Lc.nx, Lc.ny, Lc.nz, Lc.nCells, nnz,
+                    mX, mY, mZ);
             }
         }
 
-        // Build coarsest-level FFT solver
+        // Build coarsest-level solver (FFT or Chebyshev)
         {
             auto& Lcoarsest = mg->levels_.back();
             int cNx = Lcoarsest.nx;
@@ -385,63 +429,126 @@ public:
             int cNz = Lcoarsest.nz;
             auto cN = static_cast<gko::size_type>(Lcoarsest.nCells);
 
-            // Compute mean coefficients at coarsest level for FFT
-            std::vector<ValueType> hcX(Lcoarsest.nCells);
-            std::vector<ValueType> hcY(Lcoarsest.nCells);
-            std::vector<ValueType> hcZ(Lcoarsest.nCells);
-            cudaMemcpy(hcX.data(), Lcoarsest.d_coeffX,
-                Lcoarsest.nCells * sizeof(ValueType), cudaMemcpyDeviceToHost);
-            cudaMemcpy(hcY.data(), Lcoarsest.d_coeffY,
-                Lcoarsest.nCells * sizeof(ValueType), cudaMemcpyDeviceToHost);
-            cudaMemcpy(hcZ.data(), Lcoarsest.d_coeffZ,
-                Lcoarsest.nCells * sizeof(ValueType), cudaMemcpyDeviceToHost);
-
-            double meanX = 0, meanY = 0, meanZ = 0;
-            for (int i = 0; i < Lcoarsest.nCells; i++)
+            if (coarseSolverType == "chebyshev")
             {
-                meanX += static_cast<double>(hcX[i]);
-                meanY += static_cast<double>(hcY[i]);
-                meanZ += static_cast<double>(hcZ[i]);
+                // Chebyshev polynomial solver at coarsest level.
+                // Higher degree (default 20) for an approximate direct solve.
+                // Uses the coarsest-level CSR matrix (already built above).
+                auto& csrCoarsest = Lcoarsest.matrix;
+
+                constexpr ValueType chebyUpper =
+                    static_cast<ValueType>(2.2);
+                constexpr ValueType chebyLower =
+                    chebyUpper / static_cast<ValueType>(30);
+
+                auto jacInner = gko::share(
+                    gko::preconditioner::Jacobi<ValueType, int>::build()
+                        .with_max_block_size(1u)
+                        .on(exec)
+                );
+
+                auto chebyFactory = gko::share(
+                    gko::solver::Chebyshev<ValueType>::build()
+                        .with_foci(std::pair<ValueType, ValueType>(
+                            chebyLower, chebyUpper
+                        ))
+                        .with_preconditioner(jacInner)
+                        .with_criteria(
+                            gko::stop::Iteration::build()
+                                .with_max_iters(
+                                    static_cast<gko::size_type>(
+                                        coarseChebDegree
+                                    )
+                                )
+                                .on(exec)
+                        )
+                        .on(exec)
+                );
+
+                mg->coarseSolver_ = gko::share(
+                    chebyFactory->generate(csrCoarsest)
+                );
+
+                if (debug >= 1)
+                {
+                    fprintf(stderr,
+                        "GeometricMG coarsest Chebyshev: %dx%dx%d,"
+                        " degree=%d\n",
+                        cNx, cNy, cNz, coarseChebDegree);
+                }
             }
-            meanX /= Lcoarsest.nCells;
-            meanY /= Lcoarsest.nCells;
-            meanZ /= Lcoarsest.nCells;
-
-            // Compute coarsest-level mesh spacing
-            // Each coarsening doubles the spacing
-            int coarsenLevels = nLevels - 1;
-            double cdx = dx * std::pow(2.0, coarsenLevels);
-            double cdy = dy * std::pow(2.0, coarsenLevels);
-            double cdz = dz * std::pow(2.0, coarsenLevels);
-
-            mg->coarseSolver_ = gko::share(
-                FFTPreconditioner<ValueType>::create(
-                    exec,
-                    gko::dim<2>{cN, cN},
-                    cNx, cNy, cNz,
-                    cdx, cdy, cdz
-                )
-            );
-
-            // Update FFT with mean coefficients from coarsest level
-            auto fftPtr = std::dynamic_pointer_cast<
-                FFTPreconditioner<ValueType>
-            >(
-                std::const_pointer_cast<gko::LinOp>(mg->coarseSolver_)
-            );
-            if (fftPtr)
+            else
             {
-                fftPtr->updateCoeffs(meanX, meanY, meanZ);
-            }
+                // FFT direct solve at coarsest level
 
-            if (debug >= 1)
-            {
-                fprintf(stderr,
-                    "GeometricMG coarsest FFT: %dx%dx%d,"
-                    " dx=%.6f dy=%.6f dz=%.6f,"
-                    " meanCoeff=(%.4e, %.4e, %.4e)\n",
-                    cNx, cNy, cNz, cdx, cdy, cdz,
-                    meanX, meanY, meanZ);
+                // Compute mean coefficients at coarsest level for FFT
+                std::vector<ValueType> hcX(Lcoarsest.nCells);
+                std::vector<ValueType> hcY(Lcoarsest.nCells);
+                std::vector<ValueType> hcZ(Lcoarsest.nCells);
+                cudaMemcpy(hcX.data(), Lcoarsest.d_coeffX,
+                    Lcoarsest.nCells * sizeof(ValueType),
+                    cudaMemcpyDeviceToHost);
+                cudaMemcpy(hcY.data(), Lcoarsest.d_coeffY,
+                    Lcoarsest.nCells * sizeof(ValueType),
+                    cudaMemcpyDeviceToHost);
+                cudaMemcpy(hcZ.data(), Lcoarsest.d_coeffZ,
+                    Lcoarsest.nCells * sizeof(ValueType),
+                    cudaMemcpyDeviceToHost);
+
+                double meanX = 0, meanY = 0, meanZ = 0;
+                for (int i = 0; i < Lcoarsest.nCells; i++)
+                {
+                    meanX += static_cast<double>(hcX[i]);
+                    meanY += static_cast<double>(hcY[i]);
+                    meanZ += static_cast<double>(hcZ[i]);
+                }
+                meanX /= Lcoarsest.nCells;
+                meanY /= Lcoarsest.nCells;
+                meanZ /= Lcoarsest.nCells;
+
+                // Compute coarsest-level mesh spacing from domain length.
+                // With ceiling division, coarsening factor isn't exactly 2^n,
+                // so derive spacing from actual dimensions: cdx = Lx / cnx.
+                double cdx = (nx * dx) / static_cast<double>(cNx);
+                double cdy = (ny * dy) / static_cast<double>(cNy);
+                double cdz = (nz * dz) / static_cast<double>(cNz);
+
+                mg->coarseSolver_ = gko::share(
+                    FFTPreconditioner<ValueType>::create(
+                        exec,
+                        gko::dim<2>{cN, cN},
+                        cNx, cNy, cNz,
+                        cdx, cdy, cdz
+                    )
+                );
+
+                // Update FFT eigenvalues with actual coarsest-level
+                // coefficients.
+                auto fftPtr = std::dynamic_pointer_cast<
+                    FFTPreconditioner<ValueType>
+                >(
+                    std::const_pointer_cast<gko::LinOp>(mg->coarseSolver_)
+                );
+                if (fftPtr)
+                {
+                    fftPtr->updateCoeffs(meanX, meanY, meanZ);
+
+                    if (debug >= 1)
+                    {
+                        fprintf(stderr,
+                            "GeometricMG FFT coeffs:"
+                            " mean=(%.4e,%.4e,%.4e)\n",
+                            meanX, meanY, meanZ);
+                    }
+                }
+
+                if (debug >= 1)
+                {
+                    fprintf(stderr,
+                        "GeometricMG coarsest FFT: %dx%dx%d,"
+                        " dx=%.6f dy=%.6f dz=%.6f\n",
+                        cNx, cNy, cNz, cdx, cdy, cdz);
+                }
             }
         }
 
@@ -503,6 +610,20 @@ protected:
             return;
         }
 
+        // Helper lambda for norms (debug only)
+        auto computeNorm = [&](const Dense* v) -> double {
+            auto normVec = Dense::create(
+                this->get_executor()->get_master(), gko::dim<2>{1, 1}
+            );
+            const_cast<Dense*>(v)->compute_norm2(normVec.get());
+            return static_cast<double>(normVec->get_const_values()[0]);
+        };
+
+        bool trace = (callCount_ == 0 && debug_ >= 2);
+
+        if (trace)
+            fprintf(stderr, "  [MG] ||b||=%.4e\n", computeNorm(dense_b));
+
         // === Downward leg: pre-smooth and restrict ===
 
         // Level 0: pre-smooth on x with RHS = b (external, not stored)
@@ -527,6 +648,10 @@ protected:
         levels_[0].matrix->apply(
             neg_one_.get(), dense_x, one_.get(), levels_[0].r.get()
         );
+
+        if (trace)
+            fprintf(stderr, "  [MG] after L0 pre-smooth: ||r0||=%.4e\n",
+                computeNorm(levels_[0].r.get()));
 
         // Restrict residual to level 1's RHS
         restrictLevel(0, levels_[0].r.get(), levels_[1].rhs.get());
@@ -565,14 +690,30 @@ protected:
             restrictLevel(
                 l, levels_[l].r.get(), levels_[l + 1].rhs.get()
             );
+
+            if (trace)
+                fprintf(stderr, "  [MG] L%d pre-smooth: ||rhs||=%.4e"
+                    " ||e||=%.4e ||r||=%.4e\n",
+                    l, computeNorm(levels_[l].rhs.get()),
+                    computeNorm(levels_[l].e.get()),
+                    computeNorm(levels_[l].r.get()));
         }
 
         // === Coarsest level: FFT direct solve ===
         {
             int cl = nLevels - 1;
+
+            if (trace)
+                fprintf(stderr, "  [MG] coarsest rhs: ||rhs_%d||=%.4e\n",
+                    cl, computeNorm(levels_[cl].rhs.get()));
+
             coarseSolver_->apply(
                 levels_[cl].rhs.get(), levels_[cl].e.get()
             );
+
+            if (trace)
+                fprintf(stderr, "  [MG] coarsest solve: ||e_%d||=%.4e\n",
+                    cl, computeNorm(levels_[cl].e.get()));
         }
 
         // === Upward leg: prolong and post-smooth ===
@@ -602,6 +743,17 @@ protected:
         // Prolong level 1 correction back to level 0
         prolongLevel(0, levels_[1].e.get(), levels_[0].z.get());
         dense_x->add_scaled(one_.get(), levels_[0].z.get());
+
+        if (trace)
+        {
+            // Compute residual after coarse correction
+            levels_[0].r->copy_from(dense_b);
+            levels_[0].matrix->apply(
+                neg_one_.get(), dense_x, one_.get(), levels_[0].r.get()
+            );
+            fprintf(stderr, "  [MG] after coarse correction: ||r0||=%.4e\n",
+                computeNorm(levels_[0].r.get()));
+        }
 
         // Post-smooth at level 0: improve x given b (external RHS)
         for (int s = 0; s < postSmooth_; s++)

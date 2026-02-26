@@ -290,6 +290,14 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
             (
                 "vcycleSmoother", "chebyshev"
             );
+            vcycleCoarseSolver_ = oglDict.lookupOrDefault<word>
+            (
+                "vcycleCoarseSolver", "fft"
+            );
+            vcycleCoarseChebDegree_ = oglDict.lookupOrDefault<label>
+            (
+                "vcycleCoarseChebDegree", 20
+            );
 
             if (vcyclePreSmooth_ != vcyclePostSmooth_)
             {
@@ -305,7 +313,10 @@ void Foam::OGL::OGLSolverBase::readOGLControls()
                 Info<< "    GeometricMG: preSmooth=" << vcyclePreSmooth_
                     << " postSmooth=" << vcyclePostSmooth_
                     << " smoother=" << vcycleSmoother_
-                    << " chebDegree=" << vcycleChebDegree_ << endl;
+                    << " chebDegree=" << vcycleChebDegree_
+                    << " coarseSolver=" << vcycleCoarseSolver_
+                    << " coarseChebDegree=" << vcycleCoarseChebDegree_
+                    << endl;
             }
         }
 
@@ -671,6 +682,8 @@ Foam::OGL::OGLSolverBase::OGLSolverBase
     vcyclePostSmooth_(1),
     vcycleChebDegree_(2),
     vcycleSmoother_("chebyshev"),
+    vcycleCoarseSolver_("fft"),
+    vcycleCoarseChebDegree_(20),
     fftDimensions_(0, 0, 0),
     meshSpacing_(0, 0, 0),
     mgMaxLevels_(10),

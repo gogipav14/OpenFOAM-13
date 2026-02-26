@@ -170,6 +170,12 @@ protected:
         //- V-cycle smoother type ("chebyshev" or "blockJacobi")
         word vcycleSmoother_;
 
+        //- Coarsest-level solver type ("fft" or "chebyshev")
+        word vcycleCoarseSolver_;
+
+        //- Coarsest-level Chebyshev degree (only if vcycleCoarseSolver="chebyshev")
+        label vcycleCoarseChebDegree_;
+
         //- Grid dimensions for FFT preconditioner (nx, ny, nz)
         Vector<label> fftDimensions_;
 

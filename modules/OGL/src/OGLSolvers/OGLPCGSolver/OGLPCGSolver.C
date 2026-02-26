@@ -1681,7 +1681,9 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
                     blockSize_,
                     std::string(vcycleSmoother_),
                     vcycleChebDegree_,
-                    debug_
+                    debug_,
+                    std::string(vcycleCoarseSolver_),
+                    vcycleCoarseChebDegree_
                 )
             );
 
@@ -1699,6 +1701,7 @@ void Foam::OGL::OGLPCGSolver::updateSolverImpl
                     << ", chebDegree=" << vcycleChebDegree_
                     << ", preSmooth=" << vcyclePreSmooth_
                     << ", postSmooth=" << vcyclePostSmooth_
+                    << ", coarseSolver=" << vcycleCoarseSolver_
                     << endl;
             }
 

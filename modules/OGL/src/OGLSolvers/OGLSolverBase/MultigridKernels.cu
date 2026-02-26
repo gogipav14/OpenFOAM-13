@@ -83,14 +83,16 @@ __global__ void restrict3DKernel(
 
 
 // -------------------------------------------------------------------------
-// Prolongation kernel: trilinear interpolation
+// Prolongation kernel: trilinear interpolation (cell-centered)
 // -------------------------------------------------------------------------
-
-// Helper: clamp value to [lo, hi]
-__device__ __forceinline__ int clampInt(int v, int lo, int hi)
-{
-    return (v < lo) ? lo : ((v > hi) ? hi : v);
-}
+// Each fine cell gets a weighted average from up to 8 coarse neighbors.
+// For cell-centered 2:1 coarsening, fine cell (fx,fy,fz) sits inside
+// coarse cell (cx,cy,cz) = (fx/2, fy/2, fz/2). Its sub-position
+// (sx,sy,sz) = (fx%2, fy%2, fz%2) determines interpolation weights:
+//   sx=0 -> weight 3/4 from parent, 1/4 from (cx-1) neighbor
+//   sx=1 -> weight 3/4 from parent, 1/4 from (cx+1) neighbor
+// Tensor product in 3D gives 8 weights. Out-of-bounds coarse indices
+// are clamped (Neumann ghost = zero-gradient BC).
 
 template<typename T>
 __global__ void prolong3DTrilinearKernel(
@@ -107,72 +109,44 @@ __global__ void prolong3DTrilinearKernel(
     int fy = (idx / fnx) % fny;
     int fz = idx / (fnx * fny);
 
-    // Parent coarse cell
+    // Parent coarse cell and sub-position within it
     int cx = fx / 2;
     int cy = fy / 2;
     int cz = fz / 2;
-
-    // Sub-position within the coarse cell (0 = left/bottom, 1 = right/top)
     int sx = fx & 1;
     int sy = fy & 1;
     int sz = fz & 1;
 
-    // 1D trilinear weights for cell-centered 2:1 coarsening:
-    //   sub=0 (left half):  w_parent=3/4, w_left_neighbor=1/4
-    //   sub=1 (right half): w_parent=3/4, w_right_neighbor=1/4
-    //
-    // In tensor product form, each fine cell reads from 2^3 = 8 coarse cells.
-    // The two coarse cells per direction are:
-    //   sub=0: {cx-1, cx}  with weights {1/4, 3/4}
-    //   sub=1: {cx, cx+1}  with weights {3/4, 1/4}
+    // Neighbor offset: sx=0 -> look left (cx-1), sx=1 -> look right (cx+1)
+    int nbx = sx ? cx + 1 : cx - 1;
+    int nby = sy ? cy + 1 : cy - 1;
+    int nbz = sz ? cz + 1 : cz - 1;
 
-    // Coarse cell indices for each direction's two contributors
-    int ix0 = sx ? cx : (cx - 1);
-    int ix1 = sx ? (cx + 1) : cx;
-    int iy0 = sy ? cy : (cy - 1);
-    int iy1 = sy ? (cy + 1) : cy;
-    int iz0 = sz ? cz : (cz - 1);
-    int iz1 = sz ? (cz + 1) : cz;
+    // Clamp to grid boundaries (Neumann ghost)
+    nbx = max(0, min(nbx, cnx - 1));
+    nby = max(0, min(nby, cny - 1));
+    nbz = max(0, min(nbz, cnz - 1));
 
-    // Clamp to grid boundaries (Neumann ghost = boundary value)
-    ix0 = clampInt(ix0, 0, cnx - 1);
-    ix1 = clampInt(ix1, 0, cnx - 1);
-    iy0 = clampInt(iy0, 0, cny - 1);
-    iy1 = clampInt(iy1, 0, cny - 1);
-    iz0 = clampInt(iz0, 0, cnz - 1);
-    iz1 = clampInt(iz1, 0, cnz - 1);
+    // Weights: 3/4 for parent, 1/4 for neighbor
+    constexpr T w0 = T(0.75);  // parent weight
+    constexpr T w1 = T(0.25);  // neighbor weight
 
-    // Weights: w0 = 3/4 (parent side), w1 = 1/4 (neighbor side)
-    T w0 = T(0.75);
-    T w1 = T(0.25);
+    // Tensor product of 1D trilinear weights (8 terms)
+    #define C(i,j,k) __ldg(&coarse[(i) + (j)*cnx + (k)*cnx*cny])
 
-    // wx[0] = weight for ix0, wx[1] = weight for ix1
-    // sub=0: ix0 is neighbor (1/4), ix1 is parent (3/4)
-    // sub=1: ix0 is parent (3/4), ix1 is neighbor (1/4)
-    T wx0 = sx ? w0 : w1;
-    T wx1 = sx ? w1 : w0;
-    T wy0 = sy ? w0 : w1;
-    T wy1 = sy ? w1 : w0;
-    T wz0 = sz ? w0 : w1;
-    T wz1 = sz ? w1 : w0;
+    T val =
+        w0*w0*w0 * C(cx,  cy,  cz ) +
+        w1*w0*w0 * C(nbx, cy,  cz ) +
+        w0*w1*w0 * C(cx,  nby, cz ) +
+        w1*w1*w0 * C(nbx, nby, cz ) +
+        w0*w0*w1 * C(cx,  cy,  nbz) +
+        w1*w0*w1 * C(nbx, cy,  nbz) +
+        w0*w1*w1 * C(cx,  nby, nbz) +
+        w1*w1*w1 * C(nbx, nby, nbz);
 
-    // Read 8 coarse values via __ldg (read-only texture cache path).
-    // Adjacent fine threads in a 2x2x2 block share most of these reads.
-    #define CVAL(i,j,k) __ldg(&coarse[(i) + (j)*cnx + (k)*cnx*cny])
-
-    T val = T(0);
-    val += wx0 * wy0 * wz0 * CVAL(ix0, iy0, iz0);
-    val += wx1 * wy0 * wz0 * CVAL(ix1, iy0, iz0);
-    val += wx0 * wy1 * wz0 * CVAL(ix0, iy1, iz0);
-    val += wx1 * wy1 * wz0 * CVAL(ix1, iy1, iz0);
-    val += wx0 * wy0 * wz1 * CVAL(ix0, iy0, iz1);
-    val += wx1 * wy0 * wz1 * CVAL(ix1, iy0, iz1);
-    val += wx0 * wy1 * wz1 * CVAL(ix0, iy1, iz1);
-    val += wx1 * wy1 * wz1 * CVAL(ix1, iy1, iz1);
+    #undef C
 
     fine[idx] = val;
-
-    #undef CVAL
 }
 
 
@@ -221,8 +195,16 @@ __global__ void restrictCoeffsKernel(
         }
     }
 
-    // Scale: coarse coupling = 2 * fine coupling for 2:1 coarsening.
-    // (Area quadruples but distance doubles -> net 2x scaling.)
+    // Rediscretized coarse operator scaling.
+    //
+    // For a structured grid with cell-centered FV and 2:1 coarsening:
+    //   - Coarse face area = 4 * fine face area  (2x in each tangential dir)
+    //   - Coarse cell distance = 2 * fine cell distance
+    //   - Coarse coupling = area / distance = 4/2 = 2x fine coupling
+    //
+    // Average fine coefficients in the 2x2x2 block, then scale by 2.
+    // This is the standard rediscretized approach (NOT Galerkin R*A*P).
+    // Used with trilinear prolongation for smooth corrections.
     T scale = T(2) / T(count);
     coarseX[idx] = sumX * scale;
     coarseY[idx] = sumY * scale;
@@ -284,7 +266,9 @@ __global__ void fillCSR7pt(
     T diag = T(0);
 
     // Fill off-diagonals in sorted column order.
-    // Column index = ix + iy*nx + iz*nx*ny
+    // OpenFOAM convention: POSITIVE off-diagonals, NEGATIVE diagonal
+    // (negative-definite for Laplacian, matching FFT eigenvalue sign).
+    // coeffX/Y/Z store positive magnitudes (= face coupling strength).
 
     // -z neighbor
     if (iz > 0)
@@ -357,7 +341,7 @@ __global__ void fillCSR7pt(
         offset++;
     }
 
-    // Diagonal = negative sum of off-diagonals (Laplacian property)
+    // Diagonal = negative sum of off-diagonal magnitudes (NSD Laplacian)
     values[diagOffset] = diag;
 }
 
