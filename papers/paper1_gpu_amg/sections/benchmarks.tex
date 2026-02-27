@@ -1,0 +1,87 @@
+\section{Benchmark Cases}
+\label{sec:benchmarks}
+
+All benchmarks use OpenFOAM~13 with the OGL module compiled against
+Ginkgo~v1.11.0 (CUDA backend, SM~12.0). The hardware platform is an NVIDIA
+RTX~5060 GPU (\SI{8}{\giga\byte} GDDR7 VRAM) paired with an Intel desktop CPU.
+Docker containers ensure reproducible builds from source.
+
+\subsection{Case~A: 2D lid-driven cavity (scaling study)}
+\label{sec:cavity}
+
+The primary scaling vehicle is a 2D lid-driven cavity with $k$--$\varepsilon$
+RANS turbulence, solved with PISO (3~pressure correctors) for 20~timesteps.
+Meshes range from $200 \times 200$ (\num{40000}~cells) to $2236 \times 2236$
+(\num{5e6}~cells) across eight resolutions.
+
+Four solver configurations are compared:
+\begin{enumerate}
+    \item \textbf{CPU baseline}: GAMG + Gauss--Seidel smoother for pressure;
+        smoothSolver + symmetric Gauss--Seidel for momentum.
+    \item \textbf{GPU-p}: OGL PCG + AMG for pressure; CPU solvers for
+        momentum.
+    \item \textbf{GPU-all (BJ)}: OGL PCG + AMG for pressure; OGL BiCGStab
+        + Block-Jacobi for momentum.
+    \item \textbf{GPU-all (ILU)}: OGL PCG + AMG for pressure; OGL BiCGStab
+        + ILU-ISAI for momentum.
+\end{enumerate}
+
+This case features a uniform structured mesh and constant transport properties,
+representing a best-case scenario for GPU AMG: the sparsity pattern is regular,
+coefficients are well-conditioned, and the pressure Laplacian is nearly constant
+across corrector steps.
+
+\subsection{Case~B: 3D stirred-tank bioreactor (Sartorius 50L)}
+\label{sec:sartorius}
+
+To evaluate industrial relevance, we benchmark a 3D stirred-tank bioreactor
+(Sartorius 50L geometry) with a Rushton turbine impeller modeled via the
+Multiple Reference Frame (MRF) approach. The vessel is
+$\SI{0.41}{\metre} \times \SI{0.41}{\metre} \times \SI{0.465}{\metre}$ and
+meshed with \texttt{blockMesh} at six resolution levels from
+\num{73600} to \num{5.1e6}~cells (Table~\ref{tab:sartorius-meshes}).
+
+\begin{table}[htbp]
+\centering
+\caption{Sartorius 3D mesh levels.}
+\label{tab:sartorius-meshes}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Label & $n_x \times n_y \times n_z$ & Cells & Note \\
+\midrule
+73k   & $40 \times 40 \times 46$    & \num{73600}   & Base \\
+200k  & $60 \times 60 \times 56$    & \num{201600}  & \\
+500k  & $80 \times 80 \times 80$    & \num{512000}  & \\
+1M    & $100 \times 100 \times 100$ & \num{1000000} & \\
+2M    & $126 \times 126 \times 126$ & \num{2000376} & \\
+5M    & $172 \times 172 \times 172$ & \num{5088448} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The solver is \texttt{incompressibleFluid} with $k$--$\varepsilon$ RANS
+turbulence, PIMPLE with 2~outer correctors and 2~inner pressure correctors
+(4~pressure solves per timestep), run for 10~timesteps ($\Delta t =
+\SI{0.005}{\second}$, 40~total pressure solves). Three solver configurations
+are compared:
+\begin{enumerate}
+    \item \textbf{CPU GAMG}: GAMG + Gauss--Seidel for pressure; smoothSolver +
+        symmetric Gauss--Seidel for momentum.
+    \item \textbf{GPU AMG + BJ}: OGL PCG + AMG for pressure; OGL BiCGStab +
+        Block-Jacobi for momentum.
+    \item \textbf{GPU AMG + ILU}: OGL PCG + AMG for pressure; OGL BiCGStab +
+        ILU-ISAI for momentum.
+\end{enumerate}
+
+This case presents several challenges absent from Case~A:
+\begin{itemize}
+    \item \textbf{Variable coefficients}: The MRF source terms and turbulent
+        viscosity create spatially varying pressure Laplacian coefficients that
+        change between PIMPLE outer correctors.
+    \item \textbf{3D unstructured zones}: The \texttt{topoSet}-defined rotating
+        zone creates an effectively unstructured connectivity pattern.
+    \item \textbf{Mixed boundary conditions}: Walls, baffles, and the MRF
+        interface produce a heterogeneous matrix structure.
+\end{itemize}
+These factors stress-test the AMG hierarchy quality and the cost--benefit
+balance of hierarchy caching.

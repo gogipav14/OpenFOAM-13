@@ -1,0 +1,71 @@
+\section{Introduction}
+\label{sec:introduction}
+
+The pressure Poisson equation dominates the computational cost of
+incompressible and weakly compressible CFD simulations, typically consuming
+60--80\% of total wall time in segregated pressure-velocity algorithms such as
+PISO and PIMPLE~\cite{weller1998}. Large-eddy simulation (LES) of industrial
+flows requires meshes of 2--20 million cells and long physical integration
+times, making the pressure solver the critical bottleneck for time-to-solution.
+
+GPU acceleration of sparse linear solvers offers the highest-impact
+optimization target. However, existing approaches for OpenFOAM face
+significant limitations. NVIDIA's AmgX library provides GPU-accelerated
+algebraic multigrid but is vendor-locked to NVIDIA
+hardware~\cite{piscaglia2023}. PETSc/HYPRE integrations require substantial
+code modifications and introduce complex build
+dependencies~\cite{petsc4foam}. The base OpenFOAM--Ginkgo Layer
+(OGL)~\cite{olenik2024} provides GPU solver infrastructure but ships without
+AMG preconditioning for pressure or GPU-accelerated solvers for the
+asymmetric momentum system.
+
+No prior work provides, in a single open-source module: (i)~GPU-accelerated
+AMG with hierarchy caching for the pressure Poisson system, (ii)~a GPU
+momentum solver with ILU-ISAI preconditioning, and (iii)~validated
+mesh-size-dependent preconditioner selection guidance for production use.
+
+\subsection{Contributions}
+
+This paper makes the following contributions:
+\begin{enumerate}
+    \item A GPU PCG solver with Ginkgo's parallel graph-matching AMG
+        (PGM-AMG) and convergence-gated hierarchy caching for the symmetric
+        pressure system, achieving $5.47\times$ speedup on a constant-coefficient
+        2D cavity and approaching parity (GPU/CPU$\,=0.95$) on a
+        variable-coefficient 3D stirred-tank bioreactor at \num{5e6}~cells.
+    \item A GPU BiCGStab solver with parallel ILU preconditioning using
+        incomplete sparse approximate inverse (ISAI) triangular solves for the
+        asymmetric momentum system, achieving $6.85\times$ speedup at
+        \num{5e6}~cells.
+    \item A systematic comparison of Block-Jacobi and ILU-ISAI
+        preconditioners identifying a wall-time crossover at approximately
+        \num{4.5e6}~cells, with mesh-size-dependent selection recommendations.
+    \item Empirical documentation of a superlinear iteration growth in
+        OpenFOAM's GAMG implementation (13~iterations at \num{40000}~cells to
+        123 at \num{3e6}), while the GPU AMG iteration count scales linearly.
+    \item Quantification of AMG hierarchy caching sensitivity: for
+        variable-coefficient problems (MRF, turbulence), the cache interval
+        must be short ($N=10$) to maintain preconditioner quality, directly
+        governing the setup-cost vs.\ iteration-count trade-off.
+\end{enumerate}
+
+\subsection{Related work}
+
+Olenik et al.~\cite{olenik2024} introduced the OGL plugin coupling OpenFOAM
+to the Ginkgo linear algebra library~\cite{cojean2024}, providing a
+foundation for GPU-accelerated iterative solvers with Block-Jacobi
+preconditioning. Piscaglia and Ghioldi~\cite{piscaglia2023} demonstrated
+NVIDIA AmgX integration for OpenFOAM, achieving significant speedups for
+pressure but limited to NVIDIA GPUs. The petsc4Foam
+project~\cite{petsc4foam} provides PETSc/HYPRE integration for OpenFOAM's
+linear solvers with broader hardware support.
+
+For GPU-accelerated ILU factorization, Chow and Patel~\cite{chow2015}
+developed fine-grained parallel algorithms amenable to GPU execution. Anzt et
+al.~\cite{anzt2022} introduced the ISAI approach for replacing sequential
+triangular solves with parallel sparse matrix--vector products, trading
+exactness for GPU-friendly parallelism. Wendler et al.~\cite{wendler2024}
+explored mixed-precision acceleration in the FlowSimulator CFD code.
+
+% TODO: Add 2-3 more references on GPU AMG (HYPRE, AmgX internals)
+% TODO: Add reference on coupled GPU solvers (arXiv 2024)

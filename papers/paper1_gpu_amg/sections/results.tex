@@ -1,0 +1,250 @@
+\section{Results and Discussion}
+\label{sec:results}
+
+\subsection{Case~A: Cavity scaling study}
+\label{sec:results-cavity}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{full_scaling_analysis}
+    \caption{Cavity scaling analysis across \num{40000}--\num{3e6}~cells.
+        Top row: step time, GPU speedup, and ILU-BJ wall-time gap.
+        Bottom row: momentum iteration counts ($U_x$, $U_y$) and pressure
+        iteration counts showing GAMG superlinear degradation.}
+    \label{fig:scaling-analysis}
+\end{figure}
+
+\subsubsection{GPU AMG-PCG pressure solver}
+
+Table~\ref{tab:pressure-scaling} summarizes the pressure solver performance
+across all mesh sizes for the 2D cavity.
+
+\begin{table}[htbp]
+\centering
+\caption{Cavity pressure solver: CPU GAMG vs.\ GPU AMG-PCG
+    (GPU-pressure-only configuration).}
+\label{tab:pressure-scaling}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Mesh size & CPU GAMG & GPU AMG & CPU time & GPU time & Speedup \\
+(cells) & (iters) & (iters) & (ms/step) & (ms/step) & \\
+\midrule
+\num{40000}   & 13.1 & 22.2 & 75.5    & 176     & $0.43\times$ \\
+\num{160000}  & 15.7 & 30.7 & 390     & 394     & $0.99\times$ \\
+\num{360000}  & 30.2 & 35.8 & \num{1546} & 757  & $2.04\times$ \\
+\num{640000}  & 27.1 & 41.3 & \num{2543} & \num{1353} & $1.88\times$ \\
+\num{1000000} & 66.1 & 44.1 & \num{8722} & \num{2290} & $3.81\times$ \\
+\num{3000000} & 123  & 37.7 & \num{49371} & \num{9029} & $5.47\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The GPU AMG-PCG pressure solver breaks even at approximately
+\num{200000}~cells, below which PCIe transfer and setup overhead dominate.
+Above this threshold, speedup increases monotonically, reaching
+$5.47\times$ at \num{3e6}~cells and not yet plateauing.
+
+An important crossover occurs in the iteration count: GPU AMG requires
+\emph{more} iterations than CPU GAMG at small meshes (22 vs.\ 13 at
+\num{40000}~cells) but \emph{fewer} at large meshes (38 vs.\ 123 at
+\num{3e6}). This compounds with the per-iteration GPU speedup to produce
+the $>5\times$ total speedup at scale.
+
+The convergence-gated hierarchy caching (Eq.~\ref{eq:caching}) with interval
+$N=10$ provides a \SI{14.4}{\percent} improvement over the default interval
+of 5.
+
+\subsubsection{GAMG superlinear iteration growth}
+
+A striking finding is the superlinear growth of GAMG iteration counts with
+mesh size: 13 iterations at \num{40000}~cells, escalating to 66 at
+\num{1e6} and 123 at \num{3e6}---a 9.5-fold increase over a 75-fold mesh
+refinement.  In contrast, the GPU AMG iteration count increases from 22 to
+38, a 1.7-fold increase over the same range.  At \num{3e6}~cells, GAMG
+requires $3.3\times$ more iterations than GPU AMG.
+
+This divergence is the primary driver of the GPU speedup: at
+\num{3e6}~cells, GAMG's iteration-count penalty outweighs GPU AMG's
+per-iteration overhead, producing the compound $5.47\times$ wall-time
+advantage.
+
+The bottom-right panel of Figure~\ref{fig:scaling-analysis} visualizes this
+divergence: GAMG iterations grow superlinearly while GPU AMG remains bounded.
+
+\subsubsection{BJ vs.\ ILU-ISAI crossover}
+
+The top-right panel of Figure~\ref{fig:scaling-analysis} shows the ILU-BJ
+wall-time gap converging toward crossover as mesh size increases.
+
+Block-Jacobi momentum iteration counts ($U_x$) grow with mesh size: 3.0 at
+\num{40000}~cells to 10.3 at \num{3e6}. ILU-ISAI iterations track CPU
+symmetric Gauss--Seidel quality more closely: 2.0 at \num{40000} to 6.5 at
+\num{3e6}.
+
+At \num{3e6}~cells, the full GPU configurations achieve $5.04\times$ (BJ) and
+$5.01\times$ (ILU) speedup---within \SI{1}{\percent} of each other. BJ's
+lower setup cost still marginally outweighs ILU-ISAI's iteration advantage at
+this mesh size.  The convergence trend suggests ILU-ISAI overtakes BJ above
+\num{3e6}~cells, where BJ's iteration penalty becomes the dominant cost.
+
+%% ====================================================================
+\subsection{Case~B: Sartorius 3D stirred-tank scaling}
+\label{sec:results-sartorius}
+
+Table~\ref{tab:sartorius-scaling} presents the total execution time for 10
+PIMPLE timesteps (40~pressure solves) across six mesh levels.
+
+\begin{table}[htbp]
+\centering
+\caption{Sartorius 3D scaling: total execution time (seconds) for 10 timesteps.
+    GPU/CPU ratio $>1$ indicates GPU is slower.}
+\label{tab:sartorius-scaling}
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+Mesh & Cells & \multicolumn{2}{c}{Avg.\ $p$ iters} & CPU GAMG & GPU BJ &
+    GPU ILU & GPU/CPU \\
+\cmidrule(lr){3-4}
+     &       & GAMG & AMG &  (s)  &  (s) &  (s) & (BJ) \\
+\midrule
+73k   & \num{73600}   & 4.5  & 5.2  & 3.4   & 6.2   & 6.9   & $1.8\times$ \\
+200k  & \num{201600}  & 7.5  & 7.0  & 11.4  & 13.9  & 14.6  & $1.2\times$ \\
+500k  & \num{512000}  & 7.3  & 8.1  & 32.8  & 38.7  & 68.8  & $1.2\times$ \\
+1M    & \num{1000000} & 8.0  & 9.6  & 69.3  & 107.8 & 150.4 & $1.6\times$ \\
+2M    & \num{2000376} & 8.0  & 11.3 & 174.1 & 226.9 & 302.6 & $1.3\times$ \\
+5M    & \num{5088448} & 7.8  & 14.8 & 498   & 472    & 538    & $0.95\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At small mesh sizes (73k--500k), GPU AMG is $1.2$--$1.8\times$ slower than
+CPU GAMG due to PCIe transfer and kernel launch overhead.  Above
+\num{1e6}~cells, the GPU approaches parity, and at \num{5e6}~cells, GPU AMG
+with Block-Jacobi achieves a \SI{5}{\percent} wall-time advantage
+(GPU/CPU$\,=0.95$).  This contrasts sharply with the cavity's
+$5.47\times$ speedup and reflects the cost of frequent AMG hierarchy
+rebuilds in variable-coefficient problems (Section~\ref{sec:cache-sensitivity}).
+
+\subsubsection{Solve anatomy: cached vs.\ hierarchy rebuild}
+\label{sec:solve-anatomy}
+
+Instrumenting the PCG inner loop reveals a bimodal cost structure for the
+GPU AMG preconditioner.  Each CG iteration costs approximately
+\SI{43}{\milli\second} when the AMG hierarchy is cached, but
+\SI{250}{\milli\second}--\SI{600}{\milli\second} during a hierarchy rebuild
+step---a $6$--$14\times$ penalty.  With \texttt{mgCacheInterval}$\,=10$,
+the hierarchy is reconstructed every 10th pressure solve via Ginkgo's
+PGM-AMG SpGEMM coarsening.  The reconstruction cost scales superlinearly
+with mesh size:
+
+\begin{table}[htbp]
+\centering
+\caption{AMG hierarchy rebuild cost vs.\ cached per-iteration cost (Block-Jacobi
+    momentum preconditioner).}
+\label{tab:rebuild-cost}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Mesh & Cached cost & First rebuild & Rebuild/cached \\
+     & (ms/iter)   & (ms)          & ratio \\
+\midrule
+1M   & 9   & \num{1285}    & $143\times$ \\
+2M   & 17  & \num{1854}    & $109\times$ \\
+5M   & 43  & \num{4191}    & $97\times$  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At \num{5e6}~cells, a single hierarchy rebuild costs approximately
+\SI{4.2}{\second}---equivalent to $\sim\!100$ cached CG iterations.  With
+40~pressure solves per 10~timesteps and \texttt{mgCacheInterval}$\,=10$,
+three rebuilds occur, adding $\sim\!\SI{13}{\second}$ of overhead to an
+otherwise $\sim\!\SI{22}{\second}$ solve budget (cached iterations only).
+
+\subsubsection{Cache interval sensitivity}
+\label{sec:cache-sensitivity}
+
+The choice of \texttt{mgCacheInterval} presents a direct trade-off between
+hierarchy freshness and rebuild overhead.
+Table~\ref{tab:cache-sweep} presents a sweep at \num{5e6}~cells:
+
+\begin{table}[htbp]
+\centering
+\caption{Effect of \texttt{mgCacheInterval} on total execution time at
+    \num{5e6}~cells (10~timesteps, Block-Jacobi momentum).
+    CPU GAMG baseline: \SI{498}{\second}.}
+\label{tab:cache-sweep}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+Interval & Avg.\ $p$ iters & Avg.\ $p_\text{Final}$ iters & Time (s) & GPU/CPU \\
+\midrule
+10   & 14.8 & 8.4  & 472  & $0.95\times$ \\
+50   & 21.8 & 8.2  & 1166 & $2.34\times$ \\
+100  & 21.8 & 8.2  & 1047 & $2.10\times$ \\
+1000 & 21.6 & 8.2  & 1063 & $2.13\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Increasing the cache interval from 10 to 50 \emph{worsens} total wall time
+by $2.5\times$ despite eliminating all mid-run rebuilds (with 40~total
+solves, interval$\,\geq 50$ triggers zero rebuilds after the initial
+construction).  The degradation arises from the growing iteration count:
+the stale hierarchy loses preconditioner quality as the MRF coefficients
+evolve between PIMPLE outer correctors, inflating the average
+$p$~iteration count from 14.8 to 21.8---a \SI{47}{\percent} increase.
+
+Intervals of 50, 100, and 1000 all produce effectively identical iteration
+counts ($\sim\!21.8$) and wall times ($1047$--$\SI{1166}{\second}$),
+confirming that the hierarchy degrades within the first $\sim\!10$ solves and
+does not deteriorate further.  The only interval that maintains
+preconditioner quality is $N\!=\!10$, which achieves GPU/CPU$\,=0.95$---a
+\SI{5}{\percent} advantage over CPU GAMG.
+
+This result demonstrates that for variable-coefficient industrial problems,
+\emph{frequent hierarchy rebuilds are necessary}: the
+\texttt{mgCacheInterval}$\,=10$ setting balances rebuild cost against
+preconditioner quality, whereas the cavity's constant-coefficient Laplacian
+permits indefinite caching.
+
+\subsubsection{Contrasting Case~A and Case~B}
+\label{sec:contrast}
+
+The cavity and stirred-tank results bracket the expected GPU AMG performance
+range:
+\begin{itemize}
+    \item \textbf{Constant coefficients} (cavity): GPU AMG achieves
+        $5.5\times$ speedup because the hierarchy is built once and reused
+        indefinitely; the cost is amortized over all subsequent solves.
+    \item \textbf{Variable coefficients} (stirred tank): GPU AMG achieves
+        parity with CPU GAMG ($0.95\times$ GPU/CPU ratio) at optimal
+        caching ($N\!=\!10$), because frequent hierarchy rebuilds consume
+        a significant fraction of the total solve time.
+\end{itemize}
+
+The per-iteration cost of GPU AMG-PCG scales linearly with mesh size
+($\sim\!43$~ms at \num{5e6}~cells), confirming that the sparse
+matrix--vector products are memory-bandwidth--limited as expected.  The
+bottleneck for variable-coefficient problems is exclusively the SpGEMM
+hierarchy construction, which scales superlinearly due to Ginkgo's
+aggregation-based coarsening.
+
+%% ====================================================================
+\subsection{Negative results}
+\label{sec:negative}
+
+\subsubsection{Mixed-precision AMG}
+
+Ginkgo~v1.11.0's FP32 sparse matrix--matrix product (SpGEMM), used during AMG
+hierarchy construction, is 3--$8\times$ slower than FP64. FP32 CG iterations
+are approximately $2\times$ slower per iteration. The net effect is that FP32
+AMG produces \emph{worse} wall time despite halved memory bandwidth
+requirements. Consumer GPUs with FP64:FP32 throughput ratios of 1:64 cannot
+exploit mixed precision for AMG until the underlying sparse kernels are
+optimized for single precision.
+
+\subsubsection{Exact triangular solves}
+
+ILU with exact lower/upper triangular solves (\texttt{LowerTrs}/\texttt{UpperTrs})
+reduces iteration counts by \SI{61}{\percent} compared to Block-Jacobi but
+achieves identical wall time. The sequential forward/backward substitution is
+fundamentally GPU-hostile, achieving poor thread occupancy. ISAI is essential
+for realizing the iteration-quality benefit of ILU on GPUs.

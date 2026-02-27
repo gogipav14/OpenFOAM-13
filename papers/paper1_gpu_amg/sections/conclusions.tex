@@ -1,0 +1,69 @@
+\section{Conclusions}
+\label{sec:conclusions}
+
+We presented a GPU-accelerated linear solver module for OpenFOAM's
+finite-volume framework, providing AMG-preconditioned PCG for the pressure
+Poisson system and ILU-ISAI-preconditioned BiCGStab for the asymmetric
+momentum system. The module was evaluated on two complementary benchmarks: a
+2D lid-driven cavity with constant coefficients (Case~A) and a 3D
+stirred-tank bioreactor with variable MRF coefficients (Case~B). The key
+findings are:
+
+\begin{enumerate}
+    \item \textbf{Constant-coefficient problems}: GPU AMG-PCG achieves
+        $5.47\times$ speedup over GAMG at \num{3e6}~cells, with speedup
+        increasing monotonically and not yet plateauing. The hierarchy is
+        built once and cached indefinitely, making the setup cost negligible.
+    \item \textbf{Variable-coefficient problems}: GPU AMG-PCG approaches
+        parity with CPU GAMG on the 3D stirred tank at \num{5e6}~cells
+        (GPU/CPU$\,=0.95$).  Frequent AMG hierarchy rebuilds
+        (\texttt{mgCacheInterval}$\,=10$) are required to maintain
+        preconditioner quality as MRF and turbulence coefficients evolve.
+        The rebuild cost is the dominant overhead.
+    \item \textbf{Cache interval sensitivity}: Increasing the cache interval
+        beyond 10 degrades performance on the stirred tank ($2.5\times$
+        slower at interval 50) because the stale hierarchy inflates iteration
+        counts by \SI{47}{\percent}.  Intervals of 50, 100, and 1000 all
+        produce identical degradation, confirming that the hierarchy becomes
+        stale within $\sim\!10$ solves.  The cavity tolerates
+        arbitrarily long caching.
+    \item \textbf{GAMG iteration scaling}: OpenFOAM's GAMG exhibits
+        superlinear iteration growth
+        ($13 \rightarrow 123$ from \num{40000} to \num{3e6}~cells on the
+        cavity), while GPU AMG iterations scale linearly
+        ($22 \rightarrow 38$).
+    \item \textbf{ILU-ISAI momentum}: Delivers $6.85\times$ speedup at
+        \num{5e6}~cells, outperforming Block-Jacobi above \num{4.5e6}~cells
+        on the cavity. On the stirred tank, ILU-ISAI setup cost dominates at
+        smaller meshes; the crossover is between 1--5M cells.
+    \item \textbf{Negative results}: Mixed-precision (FP32) AMG is
+        counterproductive due to suboptimal FP32 SpGEMM in Ginkgo~v1.11.0;
+        exact ILU triangular solves are GPU-hostile and ISAI is essential.
+\end{enumerate}
+
+Based on these results, we recommend:
+\begin{itemize}
+    \item Below \num{100000}~cells: CPU GAMG remains faster due to GPU launch
+        overhead.
+    \item \num{100000}--\num{4500000}~cells: GPU AMG-PCG for pressure with
+        Block-Jacobi for momentum.
+    \item Above \num{4500000}~cells: GPU AMG-PCG for pressure with ILU-ISAI
+        for momentum.
+    \item For variable-coefficient cases (MRF, turbulence):
+        \texttt{mgCacheInterval}$\,=10$ is essential; higher intervals
+        degrade preconditioner quality faster than they reduce setup cost.
+\end{itemize}
+
+The GPU per-iteration solve cost scales linearly with mesh size
+(\SI{43}{\milli\second}/iter at \num{5e6}~cells), confirming
+bandwidth-limited SpMV scaling. The practical bottleneck for industrial
+problems is the SpGEMM hierarchy construction cost, which scales
+superlinearly. Reducing this cost---through cheaper coarsening strategies,
+incremental hierarchy updates, or geometric multigrid---is the highest-impact
+path to GPU competitiveness on variable-coefficient RANS simulations.
+
+The solver is open-source, vendor-portable via Ginkgo's backend abstraction
+(NVIDIA CUDA, AMD HIP, Intel DPC++), and available as a drop-in OpenFOAM
+module.
+
+% TODO: Future work paragraph (geometric MG, multi-GPU, AMD validation)

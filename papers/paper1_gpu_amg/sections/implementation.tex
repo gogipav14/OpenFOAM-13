@@ -1,0 +1,56 @@
+\section{Implementation}
+\label{sec:implementation}
+
+\subsection{Software architecture}
+
+The solver module extends OpenFOAM's \texttt{lduMatrix::solver} interface
+through three main classes:
+
+\begin{description}
+    \item[\texttt{OGLSolverBase}] Abstract base providing LDU-to-CSR
+        conversion, Ginkgo executor management, preconditioner factory, and
+        performance instrumentation.
+    \item[\texttt{OGLPCGSolver}] Symmetric PCG solver with AMG
+        preconditioning. Manages hierarchy caching and convergence gating.
+    \item[\texttt{OGLBiCGStabSolver}] Asymmetric BiCGStab solver supporting
+        Block-Jacobi and ILU-ISAI preconditioners.
+\end{description}
+
+A custom Ginkgo \texttt{LinOp} (\texttt{FoamGinkgoLinOp}) wraps the
+OpenFOAM LDU matrix for direct use in Ginkgo's solver pipeline without
+requiring a full CSR copy for the matrix--vector product. The CSR
+representation is used only for preconditioner construction.
+
+\subsection{AMG hierarchy caching}
+
+The AMG hierarchy is stored in a static cache keyed by field name (pressure,
+velocity components). A mutex protects concurrent access. Because OpenFOAM
+creates a new solver object for each linear solve, the static cache persists
+the hierarchy across instantiations. The dual-gated caching strategy
+(Eq.~\ref{eq:caching}) balances setup amortization against convergence
+degradation from stale hierarchies.
+
+\subsection{Preconditioner selection}
+
+Preconditioners are selected via the \texttt{preconditioner} keyword in the
+\texttt{OGLCoeffs} sub-dictionary of \texttt{fvSolution}:
+
+\begin{itemize}
+    \item \texttt{blockJacobi}: Ginkgo's block-diagonal Jacobi with
+        configurable block size (default 1).
+    \item \texttt{ILU}: ParILU factorization with ISAI approximate
+        triangular solves. ParILU iterations and ISAI sparsity power
+        configurable.
+    \item \texttt{multigrid}: Ginkgo PGM-AMG with configurable coarsening
+        and smoothing parameters.
+\end{itemize}
+
+\subsection{Performance instrumentation}
+
+RAII-based \texttt{ScopedTimer} objects measure per-phase wall time
+(hierarchy construction, preconditioner setup, solver iterations). GPU memory
+diagnostics (free/total VRAM) are logged at hierarchy construction to detect
+memory pressure. Per-solve iteration counts and convergence status are
+tracked for the caching heuristic.
+
+% TODO: Add architecture diagram (Figure 1)

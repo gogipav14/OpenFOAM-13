@@ -1,0 +1,98 @@
+\section{Mathematical Formulation}
+\label{sec:formulation}
+
+\subsection{Pressure Poisson system}
+\label{sec:pressure}
+
+The pressure equation arising from the PISO/PIMPLE algorithm yields a
+symmetric positive-definite linear system $Ap = b$, where $A$ is the
+Laplacian operator discretized on the finite-volume mesh. We solve this
+system with preconditioned conjugate gradients (PCG) using algebraic
+multigrid (AMG) as the preconditioner.
+
+OpenFOAM stores the matrix in Lower-Diagonal-Upper (LDU) face-based format.
+For GPU execution, we convert to Compressed Sparse Row (CSR) format. The
+sparsity structure is static on fixed meshes, so we cache the CSR column
+indices and row pointers, updating only the numerical values each solve
+(\texttt{invalidateValues()} refresh).
+
+\subsubsection{AMG preconditioning}
+
+We use Ginkgo's Parallel Graph Matching (PGM) algebraic multigrid with
+Jacobi smoothing. The PGM coarsening algorithm constructs the multigrid
+hierarchy through parallel graph matching of the adjacency graph defined by
+the matrix entries, achieving $O(N)$ setup cost.
+
+\subsubsection{Convergence-gated hierarchy caching}
+
+AMG hierarchy construction involves expensive sparse matrix--matrix products
+(SpGEMM) for the Galerkin coarse-grid operators $A_c = R A P$. On static or
+slowly varying meshes, the hierarchy changes minimally between consecutive
+pressure solves. We introduce convergence-gated caching to amortize the
+setup cost:
+
+Let $k_i$ be the iteration count at solve~$i$, $\tau$ the maximum-iteration
+threshold, and $N$ the cache interval. The hierarchy is rebuilt when
+\begin{equation}
+\label{eq:caching}
+\mathrm{rebuild}(i) =
+\begin{cases}
+    \mathrm{true} & \text{if } i \bmod N = 0, \\
+    \mathrm{true} & \text{if } k_{i-1} > \tau, \\
+    \mathrm{false} & \text{otherwise.}
+\end{cases}
+\end{equation}
+This amortizes the $O(N_{\mathrm{levels}} \cdot \mathrm{nnz})$ hierarchy
+construction across $N$ solves while preserving convergence through the
+iteration-count safety valve.
+
+\subsection{Momentum system}
+\label{sec:momentum}
+
+The discretized momentum equation yields an asymmetric linear system
+$A_U \mathbf{u} = \mathbf{b}_U$ due to the advection terms. We solve each
+velocity component with the stabilized biconjugate gradient method
+(BiCGStab).
+
+\subsubsection{Block-Jacobi preconditioning}
+
+Block-Jacobi extracts and inverts the block-diagonal of $A_U$, providing a
+parallel preconditioner with minimal setup. Its quality degrades as mesh size
+increases: the block-diagonal captures a shrinking fraction of the total
+coupling.
+
+\subsubsection{ILU-ISAI preconditioning}
+
+For large meshes, we employ parallel incomplete LU (ParILU) factorization
+following Chow and Patel~\cite{chow2015}: $A_U \approx LU$ computed via
+iterative sweeps suitable for GPU execution. The triangular solves
+$L^{-1}r$ and $U^{-1}r$ are then approximated using the Incomplete Sparse
+Approximate Inverse (ISAI) technique~\cite{anzt2022}: precomputed sparse
+matrices $\tilde{L}^{-1} \approx L^{-1}$ and $\tilde{U}^{-1} \approx
+U^{-1}$ replace the sequential forward/backward substitution with parallel
+sparse matrix--vector products:
+\begin{equation}
+M^{-1}r = \tilde{U}^{-1}\bigl(\tilde{L}^{-1}r\bigr).
+\end{equation}
+This transformation is essential for GPU performance: exact triangular solves
+are inherently sequential (row~$i$ depends on row~$i{-}1$), achieving poor
+thread occupancy. ISAI trades exactness for parallelism---the approximate
+inverse is computed once and applied as two parallel \SpMV{} operations.
+
+\subsection{LDU to CSR conversion}
+\label{sec:ldu-csr}
+
+OpenFOAM's face-based LDU storage must be converted to CSR for Ginkgo's GPU
+kernels. We implement a two-phase approach:
+\begin{enumerate}
+    \item \textbf{Structure phase} (first solve only): Compute row pointers
+        and column indices from the mesh adjacency. Cache for reuse on static
+        meshes.
+    \item \textbf{Value phase} (every solve): Copy diagonal and off-diagonal
+        coefficients into the pre-allocated CSR value array. For symmetric
+        matrices (pressure), upper and lower triangular values are mirrored.
+        For asymmetric matrices (momentum), upper and lower values differ.
+\end{enumerate}
+The value refresh is triggered by \texttt{invalidateValues()}, ensuring the
+CSR coefficients match the current PISO/PIMPLE corrector step without
+redundant structure recomputation.

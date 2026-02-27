@@ -1,0 +1,118 @@
+\documentclass[review]{elsarticle}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{siunitx}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{lineno}
+
+\linenumbers
+
+% Graphics paths: point to existing benchmark figure directories
+\graphicspath{
+  {../../benchmarks/bicgstab_results_ilu_isai/}
+  {../../benchmarks/bicgstab_results_crossover/}
+  {../../benchmarks/mg_cache_sweep/}
+  {../../benchmarks/sartorius_figures/}
+  {../../benchmarks/figures/}
+  {figures/}
+}
+
+% Custom commands
+\newcommand{\OF}{OpenFOAM}
+\newcommand{\GK}{Ginkgo}
+\newcommand{\OGL}{OGL}
+\newcommand{\PCG}{PCG}
+\newcommand{\BiCGStab}{BiCGStab}
+\newcommand{\AMG}{AMG}
+\newcommand{\GAMG}{GAMG}
+\newcommand{\ISAI}{ISAI}
+\newcommand{\ILU}{ILU}
+\newcommand{\BJ}{BJ}
+\newcommand{\CSR}{CSR}
+\newcommand{\LDU}{LDU}
+\newcommand{\SpMV}{SpMV}
+\newcommand{\norm}[1]{\left\|#1\right\|}
+\newcommand{\abs}[1]{\left|#1\right|}
+
+\journal{Computer Physics Communications}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{GPU-Accelerated Algebraic Multigrid and ILU-ISAI Preconditioned
+Krylov Solvers for Finite-Volume CFD via the Ginkgo Linear Algebra Library}
+
+%% Authors -- fill in before submission
+\author[inst1]{First Author}
+\author[inst1]{Second Author}
+
+\affiliation[inst1]{organization={Department, University},
+            city={City},
+            country={Country}}
+
+\begin{abstract}
+We present a GPU-accelerated linear solver module for the OpenFOAM
+finite-volume framework, built on the Ginkgo numerical linear algebra
+library. The module provides two solver classes targeting the dominant
+computational costs in pressure-velocity coupled CFD: (1)~a preconditioned
+conjugate gradient solver with algebraic multigrid (AMG) preconditioning for
+the symmetric pressure Poisson system, featuring convergence-gated hierarchy
+caching that amortizes the expensive multigrid setup across multiple solves;
+and (2)~a stabilized biconjugate gradient solver (BiCGStab) with parallel
+incomplete LU preconditioning using incomplete sparse approximate inverse
+triangular solves (ILU-ISAI) for the asymmetric momentum system.
+
+We validate the implementation on two complementary benchmarks from
+\num{40000} to \num{5e6}~cells: a 2D lid-driven cavity with constant
+coefficients and a 3D stirred-tank bioreactor with variable MRF coefficients.
+On the cavity, GPU AMG-PCG achieves $5.47\times$ speedup over OpenFOAM's
+native GAMG at \num{3e6}~cells, with speedup increasing monotonically. On
+the industrial stirred tank, GPU AMG approaches parity with CPU GAMG at
+\num{5e6}~cells (GPU/CPU$\,=0.95$), limited by frequent AMG hierarchy
+rebuilds necessitated by evolving coefficients. We identify and quantify a previously unreported
+superlinear iteration growth in OpenFOAM's GAMG
+(13\,\textrightarrow\,123~iterations from \num{40000} to \num{3e6}~cells),
+while GPU AMG iterations scale linearly. A cache-interval sensitivity study
+reveals that for variable-coefficient problems, frequent hierarchy rebuilds
+($N\!=\!10$) are essential, whereas constant-coefficient cases tolerate
+indefinite caching. The solver is open-source and portable across NVIDIA,
+AMD, and Intel GPUs via Ginkgo's backend abstraction.
+\end{abstract}
+
+\begin{keyword}
+GPU computing \sep algebraic multigrid \sep incomplete LU \sep
+sparse approximate inverse \sep OpenFOAM \sep computational fluid dynamics
+\end{keyword}
+
+\end{frontmatter}
+
+%% ===================================================================
+\input{sections/introduction}
+\input{sections/formulation}
+\input{sections/implementation}
+\input{sections/benchmarks}
+\input{sections/results}
+\input{sections/conclusions}
+
+%% ===================================================================
+\section*{Acknowledgements}
+% TODO: funding, compute resources, Ginkgo developers
+
+\section*{Data availability}
+The solver source code is available at
+\url{https://github.com/gogipav14/OpenFOAM-13}.
+Benchmark scripts and result data are included in the repository under
+\texttt{benchmarks/}.
+
+%% ===================================================================
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}
